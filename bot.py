@@ -13,7 +13,7 @@ from handlers import start, callback, accounts
 from services.event_manager import run_full_event_cycle
 from services.scheduler import ensure_scheduler_started, trigger_daily_flag
 from services.event_checker import check_all_events  # ✅ для мгновенной проверки
-from services.logger import logger, cleanup_old_logs  # ← добавить сюда импорт
+from services.logger import logger, cleanup_old_logs, LOG_DIR  # ← добавить сюда импорт
 
 # ────────────────────────────────────────────────
 # ⚙️ Настройки автозапуска
@@ -29,8 +29,6 @@ async def on_startup(bot: Bot) -> None:
     # 🧹 Очистка старых логов (старше 3 дней)
     try:
         # гарантируем, что папка logs существует
-        import os
-        from services.logger import LOG_DIR
         os.makedirs(LOG_DIR, exist_ok=True)
 
         cleanup_old_logs(3)
@@ -39,16 +37,20 @@ async def on_startup(bot: Bot) -> None:
         logger.warning(f"⚠️ Ошибка при очистке логов при старте: {e}")
 
     now = datetime.datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+    primary_admin_id = ADMIN_IDS[0] if ADMIN_IDS else None
 
     # уведомление админов
     try:
-        for admin_id in ADMIN_IDS:
-            await bot.send_message(
-                admin_id,
-                f"✅ Бот успешно перезапущен и готов к работе!\n🕓 <b>{now}</b>",
-                parse_mode="HTML"
-            )
-        logger.info(f"✅ Бот успешно перезапущен ({now})")
+        if ADMIN_IDS:
+            for admin_id in ADMIN_IDS:
+                await bot.send_message(
+                    admin_id,
+                    f"✅ Бот успешно перезапущен и готов к работе!\n🕓 <b>{now}</b>",
+                    parse_mode="HTML"
+                )
+            logger.info(f"✅ Бот успешно перезапущен ({now})")
+        else:
+            logger.warning("⚠️ Список ADMIN_IDS пуст — уведомления при старте пропущены")
     except Exception as e:
         logger.warning(f"⚠️ Ошибка уведомления админов: {e}")
 
@@ -59,17 +61,21 @@ async def on_startup(bot: Bot) -> None:
                 logger.info("🚀 [BACKGROUND] Выполняю мгновенную проверку акций и автосбор…")
 
                 # 🔍 Проверка акций
-                await check_all_events(bot=bot, admin_id=ADMIN_IDS[0])
+                await check_all_events(
+                    bot=bot if primary_admin_id else None,
+                    admin_id=primary_admin_id,
+                )
 
                 # 🎯 Фарм всех активных акций
                 await run_full_event_cycle(bot=bot, manual=True)
 
                 logger.info("✅ [BACKGROUND] Мгновенный автосбор завершён.")
-                await bot.send_message(
-                    ADMIN_IDS[0],
-                    "✅ <b>Мгновенный автосбор завершён</b>\nБот готов к приёму команд.",
-                    parse_mode="HTML"
-                )
+                if primary_admin_id:
+                    await bot.send_message(
+                        primary_admin_id,
+                        "✅ <b>Мгновенный автосбор завершён</b>\nБот готов к приёму команд.",
+                        parse_mode="HTML"
+                    )
             except Exception as e:
                 logger.exception(f"❌ Ошибка при фоновом автозапуске: {e}")
 
