@@ -5,6 +5,9 @@ import json
 import logging
 import os
 import sys
+import base64
+import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -35,7 +38,7 @@ CONCURRENT = max(1, int(os.getenv("CONCURRENT", "1")))
 NAV_TIMEOUT = int(os.getenv("NAV_TIMEOUT", "60000"))
 HEADLESS = os.getenv("HEADLESS", "0") == "1"
 INTERACTIVE = os.getenv("INTERACTIVE", "0") == "1"
-SLOW_MO = float(os.getenv("SLOW_MO", "100"))
+SLOW_MO = int(float(os.getenv("SLOW_MO", "100")))
 WAIT_AFTER_NEXT = max(0, int(os.getenv("WAIT_AFTER_NEXT", "5")))
 
 
@@ -123,6 +126,31 @@ def make_new_data_format(email: str, cookies: List[Dict[str, Any]], page_content
         out["page_snapshot"] = page_content[:3000]
     return out
 
+# === JWT / cookies helpers ===
+def jwt_get_uid(token: str) -> Optional[str]:
+    try:
+        parts = token.split(".")
+        if len(parts) < 2:
+            return None
+        payload = parts[1]
+        payload += "=" * (-len(payload) % 4)
+        decoded = base64.urlsafe_b64decode(payload.encode("utf-8"))
+        obj = json.loads(decoded.decode("utf-8"))
+        for k in ("sub", "uid", "userId", "user_id", "id", "jti"):
+            if k in obj and obj[k]:
+                return str(obj[k])
+    except Exception:
+        return None
+    return None
+
+def cookies_list_to_flat_dict(cookies_list: List[Dict[str, Any]]) -> Dict[str, str]:
+    out = {}
+    for c in cookies_list:
+        n = c.get("name")
+        v = c.get("value")
+        if n:
+            out[n] = v
+    return out
 
 async def save_last_response(email: str, resp: Optional[Response]) -> None:
     if resp is None:
@@ -298,24 +326,63 @@ async def detect_challenge(page: Page) -> Optional[str]:
 
 
 async def perform_login_flow(page: Page, email: str, password: str) -> tuple[LoginStatus, str]:
-    login_url = "https://passport.igg.com/login/platform?url=https%3A%2F%2Fpassport.igg.com%2Fbindings&provider=googleplus"
-    await page.goto(login_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
+    """Логин в IGG через Google в одном браузерном контексте."""
+    base_url = "https://passport.igg.com/login"
+    google_url = (
+        "https://passport.igg.com/login/platform?"
+        "url=https%3A%2F%2Fpassport.igg.com%2Fbindings&provider=googleplus"
+    )
 
+    # --- 1️⃣ Открываем основную страницу ---
     try:
-        await page.wait_for_load_state("domcontentloaded", timeout=15000)
-    except Exception:
-        pass
+        await page.goto(base_url, wait_until="domcontentloaded", timeout=30000)
+        logger.info("[%s] открыт стартовый URL: %s", email, base_url)
+        await asyncio.sleep(1.5)
+    except Exception as e_start:
+        logger.warning("[%s] не удалось открыть стартовую страницу: %s", email, e_start)
 
+    # --- 🧩 Accept Cookies после загрузки страницы ---
     try:
-        for sel in ["#onetrust-accept-btn-handler", "text=Accept All", "text=Принять все"]:
+        for sel in [
+            "#onetrust-accept-btn-handler",
+            "text=Accept All",
+            "text=Принять все"
+        ]:
             locator = page.locator(sel)
             if await locator.count() > 0:
                 await locator.click(timeout=3000)
                 logger.info("[%s] закрыт баннер cookies (%s)", email, sel)
                 break
+    except Exception as e_cookie:
+        logger.debug("[%s] не удалось закрыть баннер cookies: %s", email, e_cookie)
+
+    # --- 2️⃣ Клик по кнопке Google (через showThirdNotice) ---
+    try:
+        google_btn = page.locator(".ways-item.google")
+
+        if await google_btn.count() > 0:
+            logger.info("[%s] 🔘 Найдена кнопка Google, кликаем...", email)
+            await google_btn.first.click(timeout=5000)
+            await asyncio.sleep(3)  # ⏳ даём странице время открыть pop-up/redirect
+        else:
+            logger.warning("[%s] ⚠️ Кнопка Google не найдена, открываю fallback-URL напрямую", email)
+            await page.goto(google_url, wait_until="domcontentloaded", timeout=30000)
+
+    except Exception as e_click:
+        logger.warning("[%s] ⚠️ Ошибка при клике по кнопке Google: %s. Перехожу по URL напрямую.", email, e_click)
+        await page.goto(google_url, wait_until="domcontentloaded", timeout=30000)
+
+    # --- 3️⃣ Принимаем cookies (если есть) ---
+    try:
+        for sel in ["#onetrust-accept-btn-handler", "text=Accept All", "text=Принять все"]:
+            if await page.locator(sel).count() > 0:
+                await page.locator(sel).click(timeout=3000)
+                logger.info("[%s] закрыт баннер cookies (%s)", email, sel)
+                break
     except Exception:
         logger.debug("[%s] баннер cookies не найден", email)
 
+    # --- 4️⃣ Ввод email ---
     logger.info("[%s] вводим e-mail", email)
     await page.wait_for_selector("input#identifierId", timeout=30000)
     await page.fill("input#identifierId", email)
@@ -323,20 +390,108 @@ async def perform_login_flow(page: Page, email: str, password: str) -> tuple[Log
     logger.debug("[%s] ожидание после identifierNext %s с", email, WAIT_AFTER_NEXT)
     if WAIT_AFTER_NEXT:
         await asyncio.sleep(WAIT_AFTER_NEXT)
+    # --- Проверяем наличие капчи после логина ---
+    try:
+        captcha_selectors = [
+            "img#captchaimg",
+            "img[src*='Captcha']",
+            "img[src*='captcha']",
+            "div#captchaimg img"
+        ]
+        input_selectors = [
+            "input#ca",
+            "input[name='ca']",
+            "input[name='captcha']",
+            "input#captcha"
+        ]
 
+        for sel in captcha_selectors:
+            if await page.locator(sel).count() > 0:
+                CAPTCHA_DIR = Path(r"C:\Users\andre\Desktop\novaypapka\tg_botzov\tg_zov\data\captcha")
+                CAPTCHA_DIR.mkdir(parents=True, exist_ok=True)
+                path = CAPTCHA_DIR / f"{email}_captcha.png"
+
+                await page.locator(sel).first.screenshot(path=str(path))
+                logger.warning("[%s] ⚠️ Обнаружена капча! Сохранена в %s", email, path)
+
+                try:
+                    from services.captcha_solver import solve_captcha
+                    text = solve_captcha(str(path))
+                except Exception as e_solve:
+                    logger.error("[%s] Ошибка при распознавании капчи: %s", email, e_solve)
+                    text = ""
+
+                if text:
+                    logger.info("[%s] Распознана капча: %s", email, text)
+                    for inp in input_selectors:
+                        if await page.locator(inp).count() > 0:
+                            await page.fill(inp, text)
+                            await asyncio.sleep(0.5)
+                            await page.keyboard.press("Enter")
+                            logger.info("[%s] Ввел текст капчи и нажал Enter", email)
+                            break
+                else:
+                    logger.warning("[%s] ❌ Капча не распознана автоматически", email)
+                break
+    except Exception as e:
+        logger.debug("[%s] Ошибка при проверке капчи: %s", email, e)
+
+    # --- 5️⃣ Ввод пароля ---
     await page.wait_for_selector("input[name=Passwd]", timeout=30000)
     await page.fill("input[name=Passwd]", password)
     await page.click("#passwordNext")
-    logger.debug("[%s] ожидание после passwordNext %s с", email, WAIT_AFTER_NEXT)
+    logger.debug("[%s] нажали passwordNext, ожидаем %s с", email, WAIT_AFTER_NEXT)
     if WAIT_AFTER_NEXT:
         await asyncio.sleep(WAIT_AFTER_NEXT)
 
+    # --- 6️⃣ Нажатие «Продолжить», если требуется ---
     try:
-        await page.wait_for_load_state("networkidle", timeout=30000)
+        cont_loc = page.locator("span[jsname='V67aGc']")
+        if await cont_loc.count() > 0:
+            await cont_loc.first.click(timeout=4000)
+            logger.info("[%s] нажата кнопка 'Продолжить'", email)
+            await asyncio.sleep(1)
+        else:
+            for txt in ("text=Продолжить", "text=Continue", "text=Continue to Google"):
+                if await page.locator(txt).count() > 0:
+                    await page.locator(txt).first.click(timeout=4000)
+                    logger.info("[%s] нажата кнопка 'Продолжить' (текст=%s)", email, txt)
+                    await asyncio.sleep(1)
+                    break
+    except Exception as e_click:
+        logger.debug("[%s] кнопка 'Продолжить' не найдена: %s", email, e_click)
+
+    # --- 7️⃣ Принимаем cookies снова (если вылезли повторно) ---
+    try:
+        for sel in ["#onetrust-accept-btn-handler", "text=Accept All", "text=Принять все"]:
+            if await page.locator(sel).count() > 0:
+                await page.locator(sel).click(timeout=3000)
+                logger.info("[%s] повторное закрытие баннера cookies (%s)", email, sel)
+                break
     except Exception:
         pass
 
-    current_url = page.url
+    # --- 8️⃣ Ожидаем загрузку страницы с аккаунтом (bindings) ---
+    try:
+        await page.wait_for_load_state("networkidle", timeout=300)
+    except Exception:
+        pass
+
+    # --- Проверяем, загрузилась ли страница bindings ---
+    for _ in range(10):
+        current_url = page.url
+        if "passport.igg.com/bindings" in current_url:
+            # ждём блок профиля
+            try:
+                if await page.locator("text=IGG ID").count() > 0 or await page.locator(
+                        "div:has-text('Привязанные аккаунты')").count() > 0:
+                    logger.info("[%s] ✅ bindings страница загружена, сохраняем куки", email)
+                    return LoginStatus.SUCCESS, f"bindings загружен (url: {current_url})"
+            except Exception:
+                pass
+        await asyncio.sleep(1)
+
+    # --- Проверяем ошибки или челлендж ---
     error_text = await detect_login_error(page)
     if error_text:
         return LoginStatus.FAILED, f"Google сообщил об ошибке: {error_text}"
@@ -345,13 +500,31 @@ async def perform_login_flow(page: Page, email: str, password: str) -> tuple[Log
     if challenge_text:
         return LoginStatus.CHALLENGE, challenge_text
 
-    if "passport.igg.com" in current_url or "igg.com" in current_url:
-        return LoginStatus.SUCCESS, f"Перенаправление на IGG успешно (url: {current_url})"
+    # --- Если bindings открыт, но без элементов ---
+    current_url = page.url
+    if "passport.igg.com/bindings" in current_url:
+        logger.info("[%s] ⚠️ На странице bindings, но элементы не найдены — считаем успехом", email)
+        return LoginStatus.SUCCESS, f"Открыта страница аккаунта IGG (url: {current_url})"
+    # --- 🔁 Возврат на стартовую страницу и сбор куков ---
+    try:
+        logger.info("[%s] переходим обратно на https://passport.igg.com/bindings для финального сбора куков", email)
+        await page.goto("https://passport.igg.com/bindings", wait_until="domcontentloaded", timeout=30000)
+        await asyncio.sleep(5)
+        logger.info("[%s] ожидание 5 сек перед сбором куков завершено", email)
+    except Exception as e_final:
+        logger.warning("[%s] не удалось открыть финальную страницу для сбора куков: %s", email, e_final)
 
     return LoginStatus.FAILED, f"Не удалось подтвердить авторизацию, текущий URL: {current_url}"
 
-
+# --- ✅ Сохранение cookies после успешного входа ---
 async def persist_success(account: Account, context, page: Page) -> None:
+    """Сохраняет cookies и HTML после успешной авторизации на странице bindings."""
+    try:
+        logger.info("[%s] ⏳ Ожидание 6 сек перед сбором cookies для стабильной загрузки...", account.mail)
+        await asyncio.sleep(6)  # ← вот здесь задержка
+    except Exception:
+        pass
+
     try:
         cookies = await context.cookies()
     except Exception as exc:
@@ -364,17 +537,100 @@ async def persist_success(account: Account, context, page: Page) -> None:
         logger.debug("[%s] не удалось получить HTML страницы: %s", account.mail, exc)
         page_snapshot = None
 
+    # создаем формат данных для записи
     new_data = make_new_data_format(account.mail, cookies, page_snapshot)
+
     filename = OUT_DIR / f"{account.slug}.json"
     atomic_write(filename, new_data)
     logger.info(
-        "[%s] cookies сохранены -> %s (uid=%s, cookies=%s)",
+        "[%s] 💾 cookies сохранены -> %s (uid=%s, cookies=%s)",
         account.mail,
         filename,
         new_data.get("uid") or "-",
         len(new_data.get("cookies", [])),
     )
 
+    # дополнительный снимок bindings-страницы (для логов)
+    try:
+        screenshot_path = OUT_DIR / f"{account.slug}_bindings.png"
+        await page.screenshot(path=str(screenshot_path), full_page=True)
+        logger.info("[%s] 📸 скриншот сохранён -> %s", account.mail, screenshot_path)
+    except Exception as exc:
+        logger.debug("[%s] не удалось сохранить скриншот: %s", account.mail, exc)
+
+    # --- ✅ Пробуем найти UID из токена (перенесено из except) ---
+    cookies_flat = cookies_list_to_flat_dict(cookies)
+    token_value = cookies_flat.get("gpc_sso_token")
+    if not new_data.get("uid") and token_value:
+        new_data["uid"] = jwt_get_uid(token_value)
+        if new_data["uid"]:
+            logger.info("[%s] 🔍 UID найден из токена: %s", account.mail, new_data["uid"])
+
+    # ✅ Обновляем основной new_data0.json
+    await update_new_data_file(account.mail, cookies, new_data.get("uid"))
+
+NEW_DATA_FILE = BASE_DIR / "data" / "data_akk" / "new_data0.json"
+
+def load_json_safe(path: Path) -> list:
+    if not path.exists():
+        return []
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        logger.warning("⚠️ Не удалось прочитать %s — создаём пустой список", path)
+        return []
+
+
+def save_json_safe(path: Path, data: list) -> None:
+    tmp = path.with_suffix(".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    tmp.replace(path)
+
+
+async def update_new_data_file(email: str, cookies: list, uid: Optional[str]) -> None:
+    """Обновляет куки для указанного email в new_data0.json."""
+    if not uid:
+        logger.warning("[%s] ⚠️ UID не найден, пропускаю обновление new_data0.json", email)
+        return
+
+    # отфильтровываем нужные куки
+    cookie_map = {}
+    for c in cookies:
+        name = c.get("name")
+        value = c.get("value")
+        if name in ("PHPSESSID", "gpc_sso_token", "RT", "locale_ln", "_cookie_privacy_"):
+            cookie_map[name] = value
+
+    if not cookie_map:
+        logger.warning("[%s] ⚠️ Не найдены целевые куки для обновления", email)
+        return
+
+    data = load_json_safe(NEW_DATA_FILE)
+    updated = False
+
+    for acc in data:
+        if acc.get("mail") == email:
+            if uid not in acc:
+                acc[uid] = {}
+            acc[uid].update(cookie_map)
+            updated = True
+            break
+
+    if not updated:
+        # если аккаунта нет — создаём новую запись
+        data.append({
+            "mail": email,
+            "paswd": "",
+            uid: cookie_map
+        })
+
+    save_json_safe(NEW_DATA_FILE, data)
+    logger.info("[%s] 🔁 обновлены куки в new_data0.json (uid=%s, %d шт.)", email, uid, len(cookie_map))
+
+import shutil
+import time
 
 async def login_one_account(
     account: Account,
@@ -386,6 +642,9 @@ async def login_one_account(
     async with sem:
         email = account.mail
         output_file = OUT_DIR / f"{account.slug}.json"
+        profile_dir = (BASE_DIR / "data" / "chrome_profiles" / account.slug).resolve()
+        user_data_dir = str(profile_dir)
+
         if skip_existing and output_file.exists():
             logger.info("[%s] пропускаю — файл %s уже существует", email, output_file)
             return
@@ -397,9 +656,22 @@ async def login_one_account(
             INTERACTIVE,
         )
 
-        profile = get_random_browser_profile()
-        user_data_dir = str((BASE_DIR / "data" / "chrome_profiles" / account.slug).resolve())
+        # --- (1) Очистка профиля перед запуском ---
+        if os.getenv("CLEAR_PROFILE", "1") == "1":
+            if profile_dir.exists():
+                for attempt in range(3):
+                    try:
+                        shutil.rmtree(profile_dir, ignore_errors=False)
+                        logger.info("[%s] 🔄 Профиль очищен перед запуском: %s", email, profile_dir)
+                        break
+                    except Exception as e_rm:
+                        logger.warning("[%s] Ошибка при удалении профиля (%d попытка): %s",
+                                       email, attempt + 1, e_rm)
+                        time.sleep(1)
+            else:
+                logger.debug("[%s] Профиль отсутствует — очищать нечего", email)
 
+        # --- (2) Запуск браузера ---
         try:
             ctx = await launch_masked_persistent_context(
                 playwright,
@@ -407,10 +679,10 @@ async def login_one_account(
                 browser_path=BROWSER_PATH,
                 headless=HEADLESS,
                 slow_mo=SLOW_MO,
-                profile=profile,
+                profile=get_random_browser_profile(),
             )
         except Exception as exc:
-            logger.exception("[%s] не удалось запустить браузер: %s", email, exc)
+            logger.exception("[%s] ❌ Не удалось запустить браузер: %s", email, exc)
             return
 
         context = ctx["context"]
@@ -428,38 +700,19 @@ async def login_one_account(
                 logger.warning("[%s] требуется ручное подтверждение: %s", email, message)
                 if INTERACTIVE:
                     await wait_for_user_confirmation(email)
-                    try:
-                        await page.wait_for_load_state("networkidle", timeout=15000)
-                    except Exception:
-                        pass
                     await persist_success(account, context, page)
                 else:
-                    artifacts = await capture_page_artifacts(page, account.slug, "challenge")
-                    if artifacts:
-                        logger.info(
-                            "[%s] сохранены артефакты для разбора: %s",
-                            email,
-                            ", ".join(str(p) for p in artifacts),
-                        )
+                    await capture_page_artifacts(page, account.slug, "challenge")
             else:
                 logger.error("[%s] авторизация не удалась", email)
-                artifacts = await capture_page_artifacts(page, account.slug, "failed")
-                if artifacts:
-                    logger.info(
-                        "[%s] сохранены артефакты ошибки: %s",
-                        email,
-                        ", ".join(str(p) for p in artifacts),
-                    )
+                await capture_page_artifacts(page, account.slug, "failed")
+
         except Exception as exc:
             logger.exception("[%s] непредвиденная ошибка: %s", email, exc)
-            artifacts = await capture_page_artifacts(page, account.slug, "exception")
-            if artifacts:
-                logger.info(
-                    "[%s] сохранены артефакты после исключения: %s",
-                    email,
-                    ", ".join(str(p) for p in artifacts),
-                )
+            await capture_page_artifacts(page, account.slug, "exception")
+
         finally:
+            # --- (3) Закрываем контекст и сохраняем последнюю страницу ---
             await save_last_response(email, recorder.last)
             try:
                 page.off("response", recorder)
@@ -470,6 +723,22 @@ async def login_one_account(
             except Exception:
                 pass
 
+            # --- (4) Удаляем профиль после завершения работы ---
+            if profile_dir.exists():
+                for attempt in range(3):
+                    try:
+                        shutil.rmtree(profile_dir, ignore_errors=False)
+                        logger.info("[%s] 🧹 Профиль удалён после завершения: %s", email, profile_dir)
+                        break
+                    except Exception as e_rm:
+                        logger.warning("[%s] Не удалось удалить профиль после завершения (%d попытка): %s",
+                                       email, attempt + 1, e_rm)
+                        time.sleep(1)
+                else:
+                    logger.error("[%s] ❌ Не удалось удалить профиль после 3 попыток: %s",
+                                 email, profile_dir)
+            else:
+                logger.debug("[%s] Папка профиля уже отсутствует", email)
 
 async def main_async(args: argparse.Namespace) -> int:
     try:
@@ -507,9 +776,10 @@ def main() -> int:
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
         except AttributeError:
             pass
+    if sys.platform.startswith("win"):
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
     return asyncio.run(main_async(args))
-
 
 if __name__ == "__main__":
     try:
