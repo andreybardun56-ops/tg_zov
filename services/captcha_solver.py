@@ -1,19 +1,34 @@
-# captcha_solver.py
+"""Captcha solving utilities."""
+
+from __future__ import annotations
+
 import io
 import math
-from typing import Optional
-from PIL import Image, ImageFilter, ImageOps, ImageChops
+import os
+from functools import lru_cache
+from pathlib import Path
+from typing import Iterable, Optional, Tuple
+
 import numpy as np
 import pytesseract
+from PIL import Image, ImageChops, ImageFilter, ImageOps
 
 # optional: easyocr fallback (install if you want)
 try:
     import easyocr
-except Exception:
+except Exception:  # pragma: no cover - optional dependency
     easyocr = None
 
-# If tesseract not in PATH on Windows, укажи путь:
-pytesseract.pytesseract.tesseract_cmd = r"C:\скаченное\tesseract.exe"
+
+def _configure_tesseract_cmd() -> None:
+    """Configure pytesseract binary path via env variable if provided."""
+
+    cmd = os.getenv("TESSERACT_CMD")
+    if cmd:
+        pytesseract.pytesseract.tesseract_cmd = cmd
+
+
+_configure_tesseract_cmd()
 
 # ---------- Image preprocessing helpers ----------
 
@@ -51,12 +66,10 @@ def adaptive_binarize(img: Image.Image, block_size: int = 15, offset: int = 10) 
     return Image.fromarray(out)
 
 def remove_background_tophat(img: Image.Image, kernel_size: int = 15) -> Image.Image:
-    # morphological top-hat: img - opening(img)
-    from PIL import ImageFilter
+    """Apply a simple morphological top-hat filter to remove background."""
+
     opened = img.filter(ImageFilter.MinFilter(kernel_size)).filter(ImageFilter.MaxFilter(kernel_size))
-    # top-hat:
-    th = ImageChops.subtract(img, opened)
-    return th
+    return ImageChops.subtract(img, opened)
 
 def denoise(img: Image.Image) -> Image.Image:
     return img.filter(ImageFilter.MedianFilter(size=3))
@@ -97,10 +110,22 @@ def ocr_tesseract(img: Image.Image, whitelist: Optional[str] = None) -> str:
     except Exception:
         return ""
 
-def ocr_easyocr(img: Image.Image) -> str:
+
+@lru_cache(maxsize=1)
+def _get_easyocr_reader() -> Optional["easyocr.Reader"]:
     if easyocr is None:
+        return None
+    try:
+        # gpu=False by default to avoid GPU requirement on servers
+        return easyocr.Reader(["en"], gpu=False)
+    except Exception:
+        return None
+
+
+def ocr_easyocr(img: Image.Image) -> str:
+    reader = _get_easyocr_reader()
+    if reader is None:
         return ""
-    reader = easyocr.Reader(['en'], gpu=False)  # set gpu=True if available
     arr = np.array(img)
     try:
         res = reader.readtext(arr, detail=0)
@@ -119,48 +144,55 @@ def preprocess_for_ocr(img: Image.Image) -> Image.Image:
     img = img.filter(ImageFilter.MedianFilter(size=3))
     return img
 
-def solve_captcha(path_or_bytes, whitelist: Optional[str] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789") -> str:
-    """
-    Main entry.
-    path_or_bytes: path to image file or bytes-like object.
-    returns: recognized string (possibly empty)
-    """
+def _load_image(path_or_bytes: "Path | str | bytes | bytearray") -> Image.Image:
     if isinstance(path_or_bytes, (bytes, bytearray)):
-        img = Image.open(io.BytesIO(path_or_bytes))
-    else:
-        img = Image.open(path_or_bytes)
+        return Image.open(io.BytesIO(path_or_bytes))
+    return Image.open(path_or_bytes)
 
-    # try a few preprocess variants and heuristics
-    attempts = []
 
-    # raw -> tesseract
+def _collect_attempts(img: Image.Image, whitelist: Optional[str]) -> Iterable[Tuple[str, str]]:
+    attempts: list[Tuple[str, str]] = []
+
     attempts.append(("tess_raw", ocr_tesseract(img, whitelist)))
 
-    # preprocessed -> tesseract
     pre = preprocess_for_ocr(img)
     attempts.append(("tess_prep", ocr_tesseract(pre, whitelist)))
 
-    # deskew + preprocessed -> tesseract
     desk = deskew(pre)
     attempts.append(("tess_prep_deskew", ocr_tesseract(desk, whitelist)))
 
-    # easyocr fallback
-    if easyocr is not None:
+    reader = _get_easyocr_reader()
+    if reader is not None:
         attempts.append(("easy_prep", ocr_easyocr(pre)))
         attempts.append(("easy_raw", ocr_easyocr(img)))
 
-    # pick the longest non-empty result (heuristic)
+    return attempts
+
+
+def _select_candidate(attempts: Iterable[Tuple[str, str]]) -> str:
     candidates = [txt for _, txt in attempts if txt and txt.strip()]
     if not candidates:
         return ""
-    # prefer alphanumeric only and strip spaces
-    candidates = [ "".join(ch for ch in c if ch.isalnum()) for c in candidates ]
+
+    candidates = ["".join(ch for ch in c if ch.isalnum()) for c in candidates]
     candidates = [c for c in candidates if c]
     if not candidates:
         return ""
-    # choose candidate with max length (likely full code)
-    chosen = max(candidates, key=len)
-    return chosen
+
+    return max(candidates, key=len)
+
+
+def solve_captcha(
+    path_or_bytes: "Path | str | bytes | bytearray",
+    whitelist: Optional[str] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+) -> str:
+    """Recognise captcha text from an image path or bytes."""
+
+    img = _load_image(path_or_bytes)
+    attempts = list(_collect_attempts(img, whitelist))
+    return _select_candidate(attempts)
+
+
 if __name__ == "__main__":
     import numpy as np
     print("✅ NumPy работает:", np.arange(5))

@@ -8,12 +8,13 @@ import sys
 import base64
 import shutil
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 try:
-    from playwright.async_api import Page, Response, async_playwright
+    from playwright.async_api import Page, Response, TimeoutError, async_playwright
 except ModuleNotFoundError as exc:  # pragma: no cover - ранний выход, если playwright не установлен
     raise SystemExit(
         "Playwright не установлен. Установите пакет 'playwright' и выполните 'playwright install'."
@@ -29,8 +30,10 @@ from services.browser_patches import (
 BASE_DIR = Path(__file__).resolve().parent.parent
 ACCOUNTS_FILE = BASE_DIR / "data/google_accounts.json"
 OUT_DIR = BASE_DIR / "data/data_akk"
+CAPTCHA_DIR = BASE_DIR / "data" / "captcha"
 LOGS_DIR = BASE_DIR / "logs"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
+CAPTCHA_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = LOGS_DIR / "login_refresh_google.log"
 
@@ -325,17 +328,23 @@ async def detect_challenge(page: Page) -> Optional[str]:
     return None
 
 
-async def perform_login_flow(page: Page, email: str, password: str) -> tuple[LoginStatus, str]:
+
+async def perform_login_flow(page: Page, email: str, password: str) -> tuple[LoginStatus, str, Page]:
     """Логин в IGG через Google в одном браузерном контексте."""
+
     base_url = "https://passport.igg.com/login"
     google_url = (
         "https://passport.igg.com/login/platform?"
         "url=https%3A%2F%2Fpassport.igg.com%2Fbindings&provider=googleplus"
     )
 
+    main_page = page
+    login_page: Page = page
+    popup_page: Optional[Page] = None
+
     # --- 1️⃣ Открываем основную страницу ---
     try:
-        await page.goto(base_url, wait_until="domcontentloaded", timeout=30000)
+        await main_page.goto(base_url, wait_until="domcontentloaded", timeout=30000)
         logger.info("[%s] открыт стартовый URL: %s", email, base_url)
         await asyncio.sleep(1.5)
     except Exception as e_start:
@@ -346,9 +355,9 @@ async def perform_login_flow(page: Page, email: str, password: str) -> tuple[Log
         for sel in [
             "#onetrust-accept-btn-handler",
             "text=Accept All",
-            "text=Принять все"
+            "text=Принять все",
         ]:
-            locator = page.locator(sel)
+            locator = main_page.locator(sel)
             if await locator.count() > 0:
                 await locator.click(timeout=3000)
                 logger.info("[%s] закрыт баннер cookies (%s)", email, sel)
@@ -356,67 +365,108 @@ async def perform_login_flow(page: Page, email: str, password: str) -> tuple[Log
     except Exception as e_cookie:
         logger.debug("[%s] не удалось закрыть баннер cookies: %s", email, e_cookie)
 
-    # --- 2️⃣ Клик по кнопке Google (через showThirdNotice) ---
+    # --- 2️⃣ Клик по кнопке Google и обработка pop-up ---
     try:
-        google_btn = page.locator(".ways-item.google")
-
+        google_btn = main_page.locator(".ways-item.google")
+        popup_page = None
         if await google_btn.count() > 0:
             logger.info("[%s] 🔘 Найдена кнопка Google, кликаем...", email)
-            await google_btn.first.click(timeout=5000)
-            await asyncio.sleep(3)  # ⏳ даём странице время открыть pop-up/redirect
+            try:
+                async with main_page.expect_popup(timeout=5000) as popup_waiter:
+                    await google_btn.first.click(timeout=5000)
+                popup_page = await popup_waiter.value
+                login_page = popup_page
+                logger.info("[%s] открыт pop-up авторизации Google", email)
+                try:
+                    await login_page.wait_for_load_state("domcontentloaded", timeout=30000)
+                except Exception as e_popup_load:
+                    logger.debug("[%s] не удалось дождаться загрузки pop-up: %s", email, e_popup_load)
+            except TimeoutError:
+                logger.debug("[%s] pop-up не открылся — авторизация идёт в текущей вкладке", email)
+                await asyncio.sleep(3)
+            except Exception as e_click:
+                logger.warning(
+                    "[%s] ⚠️ Ошибка при клике по кнопке Google: %s. Пробую открыть URL напрямую.",
+                    email,
+                    e_click,
+                )
+                popup_page = None
         else:
             logger.warning("[%s] ⚠️ Кнопка Google не найдена, открываю fallback-URL напрямую", email)
-            await page.goto(google_url, wait_until="domcontentloaded", timeout=30000)
 
-    except Exception as e_click:
-        logger.warning("[%s] ⚠️ Ошибка при клике по кнопке Google: %s. Перехожу по URL напрямую.", email, e_click)
-        await page.goto(google_url, wait_until="domcontentloaded", timeout=30000)
+        if popup_page is None:
+            login_page = main_page
+            try:
+                current_url = login_page.url
+            except Exception:
+                current_url = ""
+            if "accounts.google.com" not in current_url:
+                logger.debug("[%s] выполняю прямой переход на страницу авторизации Google", email)
+                await login_page.goto(google_url, wait_until="domcontentloaded", timeout=30000)
+    except Exception as e_nav:
+        logger.warning(
+            "[%s] ⚠️ Ошибка при переходе на авторизацию Google: %s. Пытаюсь открыть URL напрямую.",
+            email,
+            e_nav,
+        )
+        await main_page.goto(google_url, wait_until="domcontentloaded", timeout=30000)
+        login_page = main_page
 
     # --- 3️⃣ Принимаем cookies (если есть) ---
     try:
         for sel in ["#onetrust-accept-btn-handler", "text=Accept All", "text=Принять все"]:
-            if await page.locator(sel).count() > 0:
-                await page.locator(sel).click(timeout=3000)
-                logger.info("[%s] закрыт баннер cookies (%s)", email, sel)
+            locator = login_page.locator(sel)
+            if await locator.count() > 0:
+                await locator.click(timeout=3000)
+                logger.info("[%s] закрыт баннер cookies (%s) на странице авторизации", email, sel)
                 break
     except Exception:
-        logger.debug("[%s] баннер cookies не найден", email)
+        logger.debug("[%s] баннер cookies не найден на странице авторизации", email)
+
+    try:
+        is_closed = login_page.is_closed()
+    except Exception:
+        is_closed = True
+    if is_closed:
+        logger.error("[%s] Окно авторизации Google закрылось до ввода данных", email)
+        return LoginStatus.FAILED, "Окно авторизации закрылось", main_page
 
     # --- 4️⃣ Ввод email ---
     logger.info("[%s] вводим e-mail", email)
-    await page.wait_for_selector("input#identifierId", timeout=30000)
-    await page.fill("input#identifierId", email)
-    await page.click("#identifierNext")
+    await login_page.wait_for_selector("input#identifierId", timeout=30000)
+    await login_page.fill("input#identifierId", email)
+    await login_page.click("#identifierNext")
     logger.debug("[%s] ожидание после identifierNext %s с", email, WAIT_AFTER_NEXT)
     if WAIT_AFTER_NEXT:
         await asyncio.sleep(WAIT_AFTER_NEXT)
+
     # --- Проверяем наличие капчи после логина ---
     try:
         captcha_selectors = [
             "img#captchaimg",
             "img[src*='Captcha']",
             "img[src*='captcha']",
-            "div#captchaimg img"
+            "div#captchaimg img",
         ]
         input_selectors = [
             "input#ca",
             "input[name='ca']",
             "input[name='captcha']",
-            "input#captcha"
+            "input#captcha",
         ]
 
         for sel in captcha_selectors:
-            if await page.locator(sel).count() > 0:
-                CAPTCHA_DIR = Path(r"C:\Users\andre\Desktop\novaypapka\tg_botzov\tg_zov\data\captcha")
-                CAPTCHA_DIR.mkdir(parents=True, exist_ok=True)
-                path = CAPTCHA_DIR / f"{email}_captcha.png"
+            if await login_page.locator(sel).count() > 0:
+                slug = email.replace("@", "__at__")
+                captcha_path = CAPTCHA_DIR / f"{slug}_captcha.png"
 
-                await page.locator(sel).first.screenshot(path=str(path))
-                logger.warning("[%s] ⚠️ Обнаружена капча! Сохранена в %s", email, path)
+                await login_page.locator(sel).first.screenshot(path=str(captcha_path))
+                logger.warning("[%s] ⚠️ Обнаружена капча! Сохранена в %s", email, captcha_path)
 
                 try:
                     from services.captcha_solver import solve_captcha
-                    text = solve_captcha(str(path))
+
+                    text = solve_captcha(str(captcha_path))
                 except Exception as e_solve:
                     logger.error("[%s] Ошибка при распознавании капчи: %s", email, e_solve)
                     text = ""
@@ -424,10 +474,10 @@ async def perform_login_flow(page: Page, email: str, password: str) -> tuple[Log
                 if text:
                     logger.info("[%s] Распознана капча: %s", email, text)
                     for inp in input_selectors:
-                        if await page.locator(inp).count() > 0:
-                            await page.fill(inp, text)
+                        if await login_page.locator(inp).count() > 0:
+                            await login_page.fill(inp, text)
                             await asyncio.sleep(0.5)
-                            await page.keyboard.press("Enter")
+                            await login_page.keyboard.press("Enter")
                             logger.info("[%s] Ввел текст капчи и нажал Enter", email)
                             break
                 else:
@@ -437,24 +487,24 @@ async def perform_login_flow(page: Page, email: str, password: str) -> tuple[Log
         logger.debug("[%s] Ошибка при проверке капчи: %s", email, e)
 
     # --- 5️⃣ Ввод пароля ---
-    await page.wait_for_selector("input[name=Passwd]", timeout=30000)
-    await page.fill("input[name=Passwd]", password)
-    await page.click("#passwordNext")
+    await login_page.wait_for_selector("input[name=Passwd]", timeout=30000)
+    await login_page.fill("input[name=Passwd]", password)
+    await login_page.click("#passwordNext")
     logger.debug("[%s] нажали passwordNext, ожидаем %s с", email, WAIT_AFTER_NEXT)
     if WAIT_AFTER_NEXT:
         await asyncio.sleep(WAIT_AFTER_NEXT)
 
     # --- 6️⃣ Нажатие «Продолжить», если требуется ---
     try:
-        cont_loc = page.locator("span[jsname='V67aGc']")
+        cont_loc = login_page.locator("span[jsname='V67aGc']")
         if await cont_loc.count() > 0:
             await cont_loc.first.click(timeout=4000)
             logger.info("[%s] нажата кнопка 'Продолжить'", email)
             await asyncio.sleep(1)
         else:
             for txt in ("text=Продолжить", "text=Continue", "text=Continue to Google"):
-                if await page.locator(txt).count() > 0:
-                    await page.locator(txt).first.click(timeout=4000)
+                if await login_page.locator(txt).count() > 0:
+                    await login_page.locator(txt).first.click(timeout=4000)
                     logger.info("[%s] нажата кнопка 'Продолжить' (текст=%s)", email, txt)
                     await asyncio.sleep(1)
                     break
@@ -464,59 +514,110 @@ async def perform_login_flow(page: Page, email: str, password: str) -> tuple[Log
     # --- 7️⃣ Принимаем cookies снова (если вылезли повторно) ---
     try:
         for sel in ["#onetrust-accept-btn-handler", "text=Accept All", "text=Принять все"]:
-            if await page.locator(sel).count() > 0:
-                await page.locator(sel).click(timeout=3000)
+            locator = login_page.locator(sel)
+            if await locator.count() > 0:
+                await locator.click(timeout=3000)
                 logger.info("[%s] повторное закрытие баннера cookies (%s)", email, sel)
                 break
     except Exception:
         pass
 
+    def iter_open_pages() -> list[Page]:
+        pages: list[Page] = []
+        seen: set[int] = set()
+        for candidate in (login_page, main_page):
+            if candidate is None:
+                continue
+            try:
+                if candidate.is_closed():
+                    continue
+            except Exception:
+                continue
+            ident = id(candidate)
+            if ident in seen:
+                continue
+            seen.add(ident)
+            pages.append(candidate)
+        return pages
+
     # --- 8️⃣ Ожидаем загрузку страницы с аккаунтом (bindings) ---
-    try:
-        await page.wait_for_load_state("networkidle", timeout=300)
-    except Exception:
-        pass
+    for candidate in iter_open_pages():
+        try:
+            await candidate.wait_for_load_state("networkidle", timeout=1000)
+        except Exception:
+            continue
 
     # --- Проверяем, загрузилась ли страница bindings ---
-    for _ in range(10):
-        current_url = page.url
-        if "passport.igg.com/bindings" in current_url:
-            # ждём блок профиля
+    for _ in range(15):
+        for candidate in iter_open_pages():
             try:
-                if await page.locator("text=IGG ID").count() > 0 or await page.locator(
-                        "div:has-text('Привязанные аккаунты')").count() > 0:
-                    logger.info("[%s] ✅ bindings страница загружена, сохраняем куки", email)
-                    return LoginStatus.SUCCESS, f"bindings загружен (url: {current_url})"
+                current_url = candidate.url
             except Exception:
-                pass
+                continue
+
+            if "passport.igg.com/bindings" in current_url:
+                try:
+                    if await candidate.locator("text=IGG ID").count() > 0 or await candidate.locator(
+                        "div:has-text('Привязанные аккаунты')"
+                    ).count() > 0:
+                        logger.info("[%s] ✅ bindings страница загружена, сохраняем куки", email)
+                        return LoginStatus.SUCCESS, f"bindings загружен (url: {current_url})", candidate
+                except Exception:
+                    pass
         await asyncio.sleep(1)
 
     # --- Проверяем ошибки или челлендж ---
-    error_text = await detect_login_error(page)
-    if error_text:
-        return LoginStatus.FAILED, f"Google сообщил об ошибке: {error_text}"
+    for candidate in iter_open_pages():
+        error_text = await detect_login_error(candidate)
+        if error_text:
+            return LoginStatus.FAILED, f"Google сообщил об ошибке: {error_text}", candidate
 
-    challenge_text = await detect_challenge(page)
-    if challenge_text:
-        return LoginStatus.CHALLENGE, challenge_text
+    for candidate in iter_open_pages():
+        challenge_text = await detect_challenge(candidate)
+        if challenge_text:
+            return LoginStatus.CHALLENGE, challenge_text, candidate
 
     # --- Если bindings открыт, но без элементов ---
-    current_url = page.url
-    if "passport.igg.com/bindings" in current_url:
-        logger.info("[%s] ⚠️ На странице bindings, но элементы не найдены — считаем успехом", email)
-        return LoginStatus.SUCCESS, f"Открыта страница аккаунта IGG (url: {current_url})"
+    for candidate in iter_open_pages():
+        try:
+            current_url = candidate.url
+        except Exception:
+            continue
+
+        if "passport.igg.com/bindings" in current_url:
+            logger.info(
+                "[%s] ⚠️ На странице bindings, но элементы не найдены — считаем успехом",
+                email,
+            )
+            return LoginStatus.SUCCESS, f"Открыта страница аккаунта IGG (url: {current_url})", candidate
+
     # --- 🔁 Возврат на стартовую страницу и сбор куков ---
     try:
-        logger.info("[%s] переходим обратно на https://passport.igg.com/bindings для финального сбора куков", email)
-        await page.goto("https://passport.igg.com/bindings", wait_until="domcontentloaded", timeout=30000)
+        logger.info(
+            "[%s] переходим обратно на https://passport.igg.com/bindings для финального сбора куков",
+            email,
+        )
+        await main_page.goto(
+            "https://passport.igg.com/bindings", wait_until="domcontentloaded", timeout=30000
+        )
         await asyncio.sleep(5)
         logger.info("[%s] ожидание 5 сек перед сбором куков завершено", email)
     except Exception as e_final:
         logger.warning("[%s] не удалось открыть финальную страницу для сбора куков: %s", email, e_final)
 
-    return LoginStatus.FAILED, f"Не удалось подтвердить авторизацию, текущий URL: {current_url}"
+    try:
+        main_page_closed = main_page.is_closed()
+    except Exception:
+        main_page_closed = True
+    fallback_page = main_page if not main_page_closed else login_page
+    current_url = ""
+    try:
+        current_url = fallback_page.url
+    except Exception:
+        pass
+    return LoginStatus.FAILED, f"Не удалось подтвердить авторизацию, текущий URL: {current_url}", fallback_page
 
-# --- ✅ Сохранение cookies после успешного входа ---
+
 async def persist_success(account: Account, context, page: Page) -> None:
     """Сохраняет cookies и HTML после успешной авторизации на странице bindings."""
     try:
@@ -629,9 +730,6 @@ async def update_new_data_file(email: str, cookies: list, uid: Optional[str]) ->
     save_json_safe(NEW_DATA_FILE, data)
     logger.info("[%s] 🔁 обновлены куки в new_data0.json (uid=%s, %d шт.)", email, uid, len(cookie_map))
 
-import shutil
-import time
-
 async def login_one_account(
     account: Account,
     sem: asyncio.Semaphore,
@@ -688,24 +786,31 @@ async def login_one_account(
         context = ctx["context"]
         page = ctx["page"]
         recorder = ResponseRecorder()
-        page.on("response", recorder)
+        context.on("response", recorder)
 
         try:
-            status, message = await perform_login_flow(page, email, account.password)
+            status, message, active_page = await perform_login_flow(page, email, account.password)
             logger.info("[%s] результат авторизации: %s", email, message)
 
+            target_page = active_page if active_page is not None else page
+            try:
+                if target_page.is_closed():
+                    target_page = page
+            except Exception:
+                target_page = page
+
             if status is LoginStatus.SUCCESS:
-                await persist_success(account, context, page)
+                await persist_success(account, context, target_page)
             elif status is LoginStatus.CHALLENGE:
                 logger.warning("[%s] требуется ручное подтверждение: %s", email, message)
                 if INTERACTIVE:
                     await wait_for_user_confirmation(email)
-                    await persist_success(account, context, page)
+                    await persist_success(account, context, target_page)
                 else:
-                    await capture_page_artifacts(page, account.slug, "challenge")
+                    await capture_page_artifacts(target_page, account.slug, "challenge")
             else:
                 logger.error("[%s] авторизация не удалась", email)
-                await capture_page_artifacts(page, account.slug, "failed")
+                await capture_page_artifacts(target_page, account.slug, "failed")
 
         except Exception as exc:
             logger.exception("[%s] непредвиденная ошибка: %s", email, exc)
@@ -715,7 +820,7 @@ async def login_one_account(
             # --- (3) Закрываем контекст и сохраняем последнюю страницу ---
             await save_last_response(email, recorder.last)
             try:
-                page.off("response", recorder)
+                context.off("response", recorder)
             except Exception:
                 pass
             try:
