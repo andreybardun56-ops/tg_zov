@@ -1,0 +1,13 @@
+{
+  "url": "https://c.go-mpulse.net/api/config.json?key=RSD6H-JGVHG-5KTYV-GV29E-TY6A3&d=passport.igg.com&t=5871082&v=1.632.0&if=&sl=0&si=g3yjl8y5swf-t4naqz&plugins=AK,ConfigOverride,Continuity,PageParams,IFrameDelay,AutoXHR,SPA,Angular,Backbone,Ember,History,RT,CrossDomain,BW,PaintTiming,NavigationTiming,ResourceTiming,Memory,CACHE_RELOAD,Errors,TPAnalytics,UserTiming,Akamai,LOGN&acao=&ak.ai=537709",
+  "status": 200,
+  "headers": {
+    "access-control-allow-origin": "*",
+    "cache-control": "private, max-age=120, stale-while-revalidate=60, stale-if-error=120",
+    "content-length": "51",
+    "timing-allow-origin": "*",
+    "date": "Fri, 24 Oct 2025 16:49:48 GMT",
+    "content-type": "application/json"
+  },
+  "body_snippet": null
+}

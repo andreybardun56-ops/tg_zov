@@ -1,0 +1,39 @@
+2025-10-24 22:35:55,444 [INFO] [castleclasqw1@gmail.com] start
+2025-10-24 22:35:55,444 [INFO] [castleclasqw1@gmail.com] launching real Chrome at .venv\Chrome\Application\chrome.exe
+2025-10-24 22:35:58,435 [INFO] [castleclasqw1@gmail.com] waiting for email field
+2025-10-24 22:35:58,569 [INFO] [castleclasqw1@gmail.com] email entered
+2025-10-24 22:35:58,771 [INFO] [castleclasqw1@gmail.com] clicked 'Next' after email
+2025-10-24 22:36:19,221 [INFO] interrupted by user
+2025-10-24 22:36:19,225 [ERROR] Future exception was never retrieved
+future: <Future finished exception=TargetClosedError('Target page, context or browser has been closed')>
+playwright._impl._errors.TargetClosedError: Target page, context or browser has been closed
+2025-10-24 22:36:19,226 [ERROR] Future exception was never retrieved
+future: <Future finished exception=TargetClosedError('Target page, context or browser has been closed')>
+playwright._impl._errors.TargetClosedError: Target page, context or browser has been closed
+2025-10-24 22:36:20,318 [INFO] [castleclasqw1@gmail.com] start
+2025-10-24 22:36:20,318 [INFO] [castleclasqw1@gmail.com] launching real Chrome at .venv\Chrome\Application\chrome.exe
+2025-10-24 22:36:24,261 [INFO] interrupted by user
+2025-10-24 22:36:24,268 [ERROR] Future exception was never retrieved
+future: <Future finished exception=TargetClosedError('Target page, context or browser has been closed')>
+playwright._impl._errors.TargetClosedError: Target page, context or browser has been closed
+2025-10-24 22:36:24,268 [ERROR] Future exception was never retrieved
+future: <Future finished exception=TargetClosedError('Target page, context or browser has been closed')>
+playwright._impl._errors.TargetClosedError: Target page, context or browser has been closed
+2025-10-24 22:36:27,827 [INFO] [castleclasqw1@gmail.com] start
+2025-10-24 22:36:27,827 [INFO] [castleclasqw1@gmail.com] launching real Chrome at .venv\Chrome\Application\chrome.exe
+2025-10-24 22:36:30,199 [INFO] [castleclasqw1@gmail.com] waiting for email field
+2025-10-24 22:36:30,332 [INFO] [castleclasqw1@gmail.com] email entered
+2025-10-24 22:36:30,518 [INFO] [castleclasqw1@gmail.com] clicked 'Next' after email
+2025-10-24 22:37:29,184 [INFO] interrupted by user
+2025-10-24 22:37:29,189 [ERROR] Future exception was never retrieved
+future: <Future finished exception=TargetClosedError('Target page, context or browser has been closed')>
+playwright._impl._errors.TargetClosedError: Target page, context or browser has been closed
+2025-10-24 22:37:38,230 [INFO] [castleclasqw2@gmail.com] start
+2025-10-24 22:37:38,231 [INFO] [castleclasqw2@gmail.com] launching real Chrome at .venv\Chrome\Application\chrome.exe
+2025-10-24 22:37:40,062 [INFO] [castleclasqw2@gmail.com] waiting for email field
+2025-10-24 22:37:40,197 [INFO] [castleclasqw2@gmail.com] email entered
+2025-10-24 22:37:40,497 [INFO] [castleclasqw2@gmail.com] clicked 'Next' after email
+2025-10-24 22:39:19,746 [INFO] interrupted by user
+2025-10-24 22:39:19,750 [ERROR] Future exception was never retrieved
+future: <Future finished exception=TargetClosedError('Target page, context or browser has been closed')>
+playwright._impl._errors.TargetClosedError: Target page, context or browser has been closed

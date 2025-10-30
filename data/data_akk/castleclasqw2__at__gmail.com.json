@@ -1,0 +1,46 @@
+{
+  "email": "castleclasqw2@gmail.com",
+  "uid": null,
+  "cookies": [
+    {
+      "name": "PHPSESSID",
+      "value": "63ad2186cb683011e946cbed6d9351b9",
+      "domain": "passport.igg.com",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": false,
+      "secure": false
+    },
+    {
+      "name": "RT",
+      "value": "\"z=1&dm=igg.com&si=e46sgb3p1vu&ss=mh536l9p&sl=0&tt=0\"",
+      "domain": ".igg.com",
+      "path": "/",
+      "expires": 1761929387,
+      "httpOnly": false,
+      "secure": false
+    }
+  ],
+  "raw_cookies": [
+    {
+      "name": "PHPSESSID",
+      "value": "63ad2186cb683011e946cbed6d9351b9",
+      "domain": "passport.igg.com",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "RT",
+      "value": "\"z=1&dm=igg.com&si=e46sgb3p1vu&ss=mh536l9p&sl=0&tt=0\"",
+      "domain": ".igg.com",
+      "path": "/",
+      "expires": 1761929387,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    }
+  ]
+}

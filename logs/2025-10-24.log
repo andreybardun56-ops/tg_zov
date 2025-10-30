@@ -1,0 +1,52 @@
+2025-10-24 22:45:04,584 [INFO] [login_refresh_google] [castleclasqw2@gmail.com] start
+2025-10-24 22:45:07,506 [INFO] [login_refresh_google] [castleclasqw2@gmail.com] waiting for email field
+2025-10-24 22:45:07,632 [INFO] [login_refresh_google] [castleclasqw2@gmail.com] email entered
+2025-10-24 22:45:07,821 [INFO] [login_refresh_google] [castleclasqw2@gmail.com] clicked 'Next' after email
+2025-10-24 22:45:07,821 [INFO] [login_refresh_google] [castleclasqw2@gmail.com] waiting 5 seconds after clicking Next...
+2025-10-24 22:45:21,367 [INFO] [login_refresh_google] interrupted by user
+2025-10-24 22:45:21,371 [ERROR] [asyncio] Future exception was never retrieved
+future: <Future finished exception=TargetClosedError('Target page, context or browser has been closed')>
+playwright._impl._errors.TargetClosedError: Target page, context or browser has been closed
+2025-10-24 22:45:21,372 [ERROR] [asyncio] Future exception was never retrieved
+future: <Future finished exception=TargetClosedError('Target page, context or browser has been closed')>
+playwright._impl._errors.TargetClosedError: Target page, context or browser has been closed
+2025-10-24 22:48:00,154 [INFO] [login_refresh_google] [castleclasqw2@gmail.com] start
+2025-10-24 22:48:03,050 [INFO] [login_refresh_google] [castleclasqw2@gmail.com] waiting for email field
+2025-10-24 22:48:03,179 [INFO] [login_refresh_google] [castleclasqw2@gmail.com] email entered
+2025-10-24 22:48:03,381 [INFO] [login_refresh_google] [castleclasqw2@gmail.com] clicked 'Next' after email
+2025-10-24 22:48:03,381 [INFO] [login_refresh_google] [castleclasqw2@gmail.com] waiting 5 seconds after clicking Next...
+2025-10-24 22:48:11,777 [INFO] [login_refresh_google] interrupted by user
+2025-10-24 22:48:11,781 [ERROR] [asyncio] Future exception was never retrieved
+future: <Future finished exception=TargetClosedError('Target page, context or browser has been closed')>
+playwright._impl._errors.TargetClosedError: Target page, context or browser has been closed
+2025-10-24 22:48:11,782 [ERROR] [asyncio] Future exception was never retrieved
+future: <Future finished exception=TargetClosedError('Target page, context or browser has been closed')>
+playwright._impl._errors.TargetClosedError: Target page, context or browser has been closed
+2025-10-24 22:49:24,238 [INFO] [login_refresh_google] [castleclasqw2@gmail.com] start
+2025-10-24 22:49:27,210 [INFO] [login_refresh_google] [castleclasqw2@gmail.com] waiting for email field
+2025-10-24 22:49:27,462 [INFO] [login_refresh_google] [castleclasqw2@gmail.com] email entered
+2025-10-24 22:49:27,623 [INFO] [login_refresh_google] [castleclasqw2@gmail.com] clicked 'Next' after email
+2025-10-24 22:49:27,623 [INFO] [login_refresh_google] [castleclasqw2@gmail.com] waiting 5 seconds after clicking Next...
+2025-10-24 22:50:02,647 [ERROR] [login_refresh_google] [castleclasqw2@gmail.com] failed: Page.wait_for_selector: Timeout 30000ms exceeded.
+Call log:
+waiting for locator("input[name=Passwd]") to be visible
+Traceback (most recent call last):
+  File "C:\Users\andre\Desktop\novaypapka\tg_botzov\tg_zov\services\login_refresh_google.py", line 146, in login_one_account
+    await page.wait_for_selector("input[name=Passwd]", timeout=30000)
+  File "C:\Users\andre\Desktop\novaypapka\tg_botzov\tg_zov\.venv\Lib\site-packages\playwright\async_api\_generated.py", line 8158, in wait_for_selector
+    await self._impl_obj.wait_for_selector(
+  File "C:\Users\andre\Desktop\novaypapka\tg_botzov\tg_zov\.venv\Lib\site-packages\playwright\_impl\_page.py", line 426, in wait_for_selector
+    return await self._main_frame.wait_for_selector(**locals_to_params(locals()))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\andre\Desktop\novaypapka\tg_botzov\tg_zov\.venv\Lib\site-packages\playwright\_impl\_frame.py", line 323, in wait_for_selector
+    await self._channel.send("waitForSelector", locals_to_params(locals()))
+  File "C:\Users\andre\Desktop\novaypapka\tg_botzov\tg_zov\.venv\Lib\site-packages\playwright\_impl\_connection.py", line 59, in send
+    return await self._connection.wrap_api_call(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\andre\Desktop\novaypapka\tg_botzov\tg_zov\.venv\Lib\site-packages\playwright\_impl\_connection.py", line 520, in wrap_api_call
+    raise rewrite_error(error, f"{parsed_st['apiName']}: {error}") from None
+playwright._impl._errors.TimeoutError: Page.wait_for_selector: Timeout 30000ms exceeded.
+Call log:
+waiting for locator("input[name=Passwd]") to be visible
+
+2025-10-24 22:50:02,789 [INFO] [login_refresh_google] [castleclasqw3@gmail.com] start

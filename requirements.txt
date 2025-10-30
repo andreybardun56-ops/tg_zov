@@ -1,0 +1,34 @@
+# --- Telegram / Бот ---
+aiogram==3.13.0
+
+# --- Асинхронные запросы и утилиты ---
+aiohttp==3.10.10
+async-timeout==4.0.3
+requests==2.32.3
+tqdm==4.67.1
+
+# --- Playwright / Браузер ---
+playwright==1.48.0
+playwright-stealth==1.0.6
+
+# --- Работа с файлами и путями ---
+# pathlib встроен в Python 3.4+, отдельная установка не нужна
+
+# --- Логирование и консольные цвета ---
+colorama==0.4.6
+loguru==0.7.2
+
+# --- Работа с JSON, датами и временем ---
+ujson==5.10.0
+pytz==2024.2
+python-dateutil==2.9.0.post0
+
+# --- Модели данных ---
+pydantic==2.7.4
+typing-extensions==4.12.2
+
+# --- SSL / HTTP ---
+certifi==2024.7.4
+idna==3.7
+charset-normalizer==3.3.2
+urllib3==2.2.3
