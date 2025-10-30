@@ -23,6 +23,7 @@ try:
         TimeoutError,
         async_playwright,
     )
+    from playwright.async_api import Page, Response, TimeoutError, async_playwright
 except ModuleNotFoundError as exc:  # pragma: no cover - ранний выход, если playwright не установлен
     raise SystemExit(
         "Playwright не установлен. Установите пакет 'playwright' и выполните 'playwright install'."
@@ -795,11 +796,13 @@ async def perform_login_flow(page: Page, email: str, password: str) -> tuple[Log
         await main_page.goto(google_url, wait_until="domcontentloaded", timeout=30000)
         login_page = await _pick_google_page(main_page, main_page)
         login_surface = await _pick_google_frame(login_page)
+        login_page = main_page
 
     # --- 3️⃣ Принимаем cookies (если есть) ---
     try:
         for sel in ["#onetrust-accept-btn-handler", "text=Accept All", "text=Принять все"]:
             locator = login_surface.locator(sel)
+            locator = login_page.locator(sel)
             if await locator.count() > 0:
                 await locator.click(timeout=3000)
                 logger.info("[%s] закрыт баннер cookies (%s) на странице авторизации", email, sel)
@@ -845,6 +848,14 @@ async def perform_login_flow(page: Page, email: str, password: str) -> tuple[Log
         login_page = await _pick_google_page(main_page, login_page)
         login_surface = await _pick_google_frame(login_page)
         await _wait_for_dom_ready(login_surface)
+    # --- 4️⃣ Ввод email ---
+    logger.info("[%s] вводим e-mail", email)
+    await login_page.wait_for_selector("input#identifierId", timeout=30000)
+    await login_page.fill("input#identifierId", email)
+    await login_page.click("#identifierNext")
+    logger.debug("[%s] ожидание после identifierNext %s с", email, WAIT_AFTER_NEXT)
+    if WAIT_AFTER_NEXT:
+        await asyncio.sleep(WAIT_AFTER_NEXT)
 
     # --- Проверяем наличие капчи после логина ---
     try:
@@ -870,6 +881,11 @@ async def perform_login_flow(page: Page, email: str, password: str) -> tuple[Log
                 captcha_path = CAPTCHA_DIR / f"{slug}_captcha.png"
 
                 await locator.first.screenshot(path=str(captcha_path))
+            if await login_page.locator(sel).count() > 0:
+                slug = email.replace("@", "__at__")
+                captcha_path = CAPTCHA_DIR / f"{slug}_captcha.png"
+
+                await login_page.locator(sel).first.screenshot(path=str(captcha_path))
                 logger.warning("[%s] ⚠️ Обнаружена капча! Сохранена в %s", email, captcha_path)
 
                 try:
@@ -893,6 +909,10 @@ async def perform_login_flow(page: Page, email: str, password: str) -> tuple[Log
                                 await captcha_input.first.press("Enter")
                             except Exception:
                                 await login_surface.keyboard.press("Enter")
+                        if await login_page.locator(inp).count() > 0:
+                            await login_page.fill(inp, text)
+                            await asyncio.sleep(0.5)
+                            await login_page.keyboard.press("Enter")
                             logger.info("[%s] Ввел текст капчи и нажал Enter", email)
                             break
                 else:
@@ -916,6 +936,9 @@ async def perform_login_flow(page: Page, email: str, password: str) -> tuple[Log
 
     await _fill_with_retry(login_surface.locator("input[name=Passwd]").first, password)
     await _click_with_retry(login_surface.locator("#passwordNext"), wait_after=0.5)
+    await login_page.wait_for_selector("input[name=Passwd]", timeout=30000)
+    await login_page.fill("input[name=Passwd]", password)
+    await login_page.click("#passwordNext")
     logger.debug("[%s] нажали passwordNext, ожидаем %s с", email, WAIT_AFTER_NEXT)
     if WAIT_AFTER_NEXT:
         await asyncio.sleep(WAIT_AFTER_NEXT)
@@ -929,6 +952,7 @@ async def perform_login_flow(page: Page, email: str, password: str) -> tuple[Log
         cont_loc = login_surface.locator("span[jsname='V67aGc']")
         if await cont_loc.count() == 0:
             cont_loc = login_page.locator("span[jsname='V67aGc']")
+        cont_loc = login_page.locator("span[jsname='V67aGc']")
         if await cont_loc.count() > 0:
             await cont_loc.first.click(timeout=4000)
             logger.info("[%s] нажата кнопка 'Продолжить'", email)
@@ -940,6 +964,8 @@ async def perform_login_flow(page: Page, email: str, password: str) -> tuple[Log
                     locator = login_page.locator(txt)
                 if await locator.count() > 0:
                     await locator.first.click(timeout=4000)
+                if await login_page.locator(txt).count() > 0:
+                    await login_page.locator(txt).first.click(timeout=4000)
                     logger.info("[%s] нажата кнопка 'Продолжить' (текст=%s)", email, txt)
                     await asyncio.sleep(1)
                     break
@@ -950,6 +976,7 @@ async def perform_login_flow(page: Page, email: str, password: str) -> tuple[Log
     try:
         for sel in ["#onetrust-accept-btn-handler", "text=Accept All", "text=Принять все"]:
             locator = login_surface.locator(sel)
+            locator = login_page.locator(sel)
             if await locator.count() > 0:
                 await locator.click(timeout=3000)
                 logger.info("[%s] повторное закрытие баннера cookies (%s)", email, sel)
@@ -974,6 +1001,9 @@ async def perform_login_flow(page: Page, email: str, password: str) -> tuple[Log
             ident = id(candidate)
             if ident in seen:
                 continue
+        for candidate in (login_page, main_page):
+            if candidate is None:
+                continue
             try:
                 if candidate.is_closed():
                     continue
@@ -982,6 +1012,11 @@ async def perform_login_flow(page: Page, email: str, password: str) -> tuple[Log
             seen.add(ident)
             pages.append(candidate)
 
+            ident = id(candidate)
+            if ident in seen:
+                continue
+            seen.add(ident)
+            pages.append(candidate)
         return pages
 
     # --- 8️⃣ Ожидаем загрузку страницы с аккаунтом (bindings) ---
@@ -1077,6 +1112,7 @@ async def perform_login_flow(page: Page, email: str, password: str) -> tuple[Log
 async def persist_success(
     account: Account, context, page: Page, last_response: Optional[Response]
 ) -> None:
+async def persist_success(account: Account, context, page: Page) -> None:
     """Сохраняет cookies и HTML после успешной авторизации на странице bindings."""
     try:
         logger.info("[%s] ⏳ Ожидание 6 сек перед сбором cookies для стабильной загрузки...", account.mail)
@@ -1251,6 +1287,7 @@ async def update_new_data_file(
         effective_uid,
         len(cookie_map),
     )
+    logger.info("[%s] 🔁 обновлены куки в new_data0.json (uid=%s, %d шт.)", email, uid, len(cookie_map))
 
 async def login_one_account(
     account: Account,
@@ -1323,11 +1360,13 @@ async def login_one_account(
 
             if status is LoginStatus.SUCCESS:
                 await persist_success(account, context, target_page, recorder.last)
+                await persist_success(account, context, target_page)
             elif status is LoginStatus.CHALLENGE:
                 logger.warning("[%s] требуется ручное подтверждение: %s", email, message)
                 if INTERACTIVE:
                     await wait_for_user_confirmation(email)
                     await persist_success(account, context, target_page, recorder.last)
+                    await persist_success(account, context, target_page)
                 else:
                     await capture_page_artifacts(target_page, account.slug, "challenge")
             else:

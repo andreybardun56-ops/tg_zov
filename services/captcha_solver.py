@@ -1,4 +1,5 @@
 """Утилиты для решения капч с несколькими стратегиями OCR."""
+"""Captcha solving utilities."""
 
 from __future__ import annotations
 
@@ -203,6 +204,11 @@ def _load_image(path_or_bytes: "Path | str | bytes | bytearray") -> Image.Image:
     if isinstance(path_or_bytes, (bytes, bytearray)):
         return Image.open(io.BytesIO(path_or_bytes))
     return Image.open(path_or_bytes)
+
+
+def _collect_attempts(img: Image.Image, whitelist: Optional[str]) -> Iterable[Tuple[str, str]]:
+    attempts: list[Tuple[str, str]] = []
+
 
 
 def _collect_attempts(img: Image.Image, whitelist: Optional[str]) -> Iterable[Tuple[str, str]]:
