@@ -338,6 +338,15 @@ UID_ATTR_CANDIDATES = (
     "data-igg-id",
 )
 
+IGG_COOKIE_HINTS = {
+    "gpc_sso_token",
+    "phpsessid",
+    "iggid",
+    "igg_id",
+    "igg_uid",
+    "igguserid",
+}
+
 
 def _normalize_uid(value: Any) -> Optional[str]:
     if value is None:
@@ -434,6 +443,57 @@ async def _extract_uid_from_page_dom(page: Page) -> Optional[str]:
     except Exception:
         body_text = None
     return _extract_uid_from_html(body_text)
+
+
+async def _detect_success_by_cookies(
+    email: str, main_page: Page, pages: Sequence[Page]
+) -> Optional[tuple[LoginStatus, str, Page]]:
+    """Проверяет, появились ли сессионные куки IGG, и возвращает успех."""
+
+    try:
+        context = main_page.context
+    except Exception:
+        return None
+
+    try:
+        cookies = await context.cookies(["https://passport.igg.com", "https://igg.com"])
+    except Exception as exc:
+        logger.debug("[%s] не удалось получить cookies для проверки успеха: %s", email, exc)
+        return None
+
+    if not cookies:
+        return None
+
+    igg_cookies = [c for c in cookies if "igg" in (c.get("domain") or "").lower()]
+    if not igg_cookies:
+        return None
+
+    cookie_map = cookies_list_to_flat_dict(igg_cookies)
+    lower_cookie_names = {name.lower() for name in cookie_map}
+    if not any(name in lower_cookie_names for name in IGG_COOKIE_HINTS):
+        return None
+
+    selected_page: Optional[Page] = None
+    for candidate in pages:
+        try:
+            url = candidate.url or ""
+        except Exception:
+            continue
+
+        if "passport.igg.com" in url:
+            selected_page = candidate
+            if "binding" in url.lower():
+                break
+
+    if selected_page is None:
+        selected_page = main_page
+
+    logger.info(
+        "[%s] ✅ Обнаружены IGG cookies (%s), считаем авторизацию успешной",
+        email,
+        ", ".join(sorted(cookie_map.keys())),
+    )
+    return LoginStatus.SUCCESS, "Получены сессионные cookies IGG", selected_page
 
 
 def _extract_uid_from_saved_snapshot(email: str) -> Optional[str]:
@@ -982,6 +1042,10 @@ async def perform_login_flow(page: Page, email: str, password: str) -> tuple[Log
                 email,
             )
             return LoginStatus.SUCCESS, f"Открыта страница аккаунта IGG (url: {current_url})", candidate
+
+    cookie_success = await _detect_success_by_cookies(email, main_page, iter_open_pages())
+    if cookie_success:
+        return cookie_success
 
     # --- 🔁 Возврат на стартовую страницу и сбор куков ---
     try:
