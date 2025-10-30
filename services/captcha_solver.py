@@ -1,3 +1,4 @@
+"""Утилиты для решения капч с несколькими стратегиями OCR."""
 """Captcha solving utilities."""
 
 from __future__ import annotations
@@ -14,10 +15,17 @@ import pytesseract
 from PIL import Image, ImageChops, ImageFilter, ImageOps
 
 # optional: easyocr fallback (install if you want)
-try:
+try:  # pragma: no cover - зависящие от окружения зависимости не критичны
     import easyocr
 except Exception:  # pragma: no cover - optional dependency
     easyocr = None
+
+try:  # pragma: no cover - используется, если доступно OpenCV
+    import cv2
+except Exception:  # pragma: no cover - не делаем hard dependency
+    cv2 = None
+
+__all__ = ["solve_captcha"]
 
 
 def _configure_tesseract_cmd() -> None:
@@ -43,26 +51,42 @@ def contrast_stretch(img: Image.Image) -> Image.Image:
     return ImageOps.autocontrast(img, cutoff=0)
 
 def adaptive_binarize(img: Image.Image, block_size: int = 15, offset: int = 10) -> Image.Image:
-    # simple adaptive threshold implementation using numpy
+    """Адаптивное пороговое преобразование с использованием OpenCV, если доступно."""
+
+    block_size = max(3, block_size | 1)  # OpenCV требует нечётный размер окна
     arr = np.array(img, dtype=np.uint8)
+
+    if cv2 is not None:
+        # cv2.adaptiveThreshold автоматически приводит изображение к uint8
+        thresh = cv2.adaptiveThreshold(
+            arr,
+            255,
+            cv2.ADAPTIVE_THRESH_MEAN_C,
+            cv2.THRESH_BINARY,
+            block_size,
+            offset,
+        )
+        return Image.fromarray(thresh)
+
+    # fallback: векторизованный расчёт среднего через интегральное изображение
     pad = block_size // 2
-    # integral image for fast mean filter
-    integral = arr.cumsum(axis=0).cumsum(axis=1)
-    H, W = arr.shape
-    out = np.zeros_like(arr)
-    for y in range(H):
-        y1 = max(0, y - pad)
-        y2 = min(H - 1, y + pad)
-        for x in range(W):
-            x1 = max(0, x - pad)
-            x2 = min(W - 1, x + pad)
-            area = (y2 - y1 + 1) * (x2 - x1 + 1)
-            s = integral[y2, x2]
-            if x1 > 0: s -= integral[y2, x1 - 1]
-            if y1 > 0: s -= integral[y1 - 1, x2]
-            if x1 > 0 and y1 > 0: s += integral[y1 - 1, x1 - 1]
-            mean = s // area
-            out[y, x] = 255 if arr[y, x] > (mean - offset) else 0
+    padded = np.pad(arr, pad, mode="edge")
+    integral = padded.cumsum(axis=0).cumsum(axis=1)
+
+    y1 = np.arange(arr.shape[0])[:, None]
+    x1 = np.arange(arr.shape[1])[None, :]
+    y2 = y1 + block_size
+    x2 = x1 + block_size
+
+    area = block_size * block_size
+    total = (
+        integral[y2, x2]
+        - integral[y1, x2]
+        - integral[y2, x1]
+        + integral[y1, x1]
+    )
+    mean = total / area
+    out = np.where(arr > (mean - offset), 255, 0).astype(np.uint8)
     return Image.fromarray(out)
 
 def remove_background_tophat(img: Image.Image, kernel_size: int = 15) -> Image.Image:
@@ -73,6 +97,35 @@ def remove_background_tophat(img: Image.Image, kernel_size: int = 15) -> Image.I
 
 def denoise(img: Image.Image) -> Image.Image:
     return img.filter(ImageFilter.MedianFilter(size=3))
+
+
+def auto_invert(img: Image.Image) -> Image.Image:
+    """Инвертирует изображение, если фон явно тёмный."""
+
+    arr = np.array(img, dtype=np.uint8)
+    # Если средняя яркость ниже середины диапазона, вероятно фон тёмный
+    if arr.mean() < 127:
+        return ImageOps.invert(img)
+    return img
+
+
+def trim_border(img: Image.Image, threshold: int = 250) -> Image.Image:
+    """Обрезает почти однотонную рамку по краям."""
+
+    if img.mode != "L":
+        gray = img.convert("L")
+    else:
+        gray = img
+
+    arr = np.array(gray)
+    mask = arr < threshold
+    if not mask.any():
+        return img
+
+    ys, xs = np.where(mask)
+    top, bottom = ys.min(), ys.max() + 1
+    left, right = xs.min(), xs.max() + 1
+    return img.crop((left, top, right, bottom))
 
 def deskew(img: Image.Image) -> Image.Image:
     # simple deskew via projection/profile - approximate
@@ -134,12 +187,15 @@ def ocr_easyocr(img: Image.Image) -> str:
         return ""
 
 def preprocess_for_ocr(img: Image.Image) -> Image.Image:
-    # pipeline tuned for small, noisy captchas
+    """Подготавливает изображение капчи к распознаванию."""
+
     img = pil_to_gray(img)
+    img = trim_border(img)
     img = contrast_stretch(img)
+    img = auto_invert(img)
     img = remove_background_tophat(img, kernel_size=15)
     img = denoise(img)
-    img = adaptive_binarize(img, block_size=15, offset=12)
+    img = adaptive_binarize(img, block_size=17, offset=12)
     img = resize_for_ocr(img, scale=3)
     img = img.filter(ImageFilter.MedianFilter(size=3))
     return img
@@ -148,6 +204,11 @@ def _load_image(path_or_bytes: "Path | str | bytes | bytearray") -> Image.Image:
     if isinstance(path_or_bytes, (bytes, bytearray)):
         return Image.open(io.BytesIO(path_or_bytes))
     return Image.open(path_or_bytes)
+
+
+def _collect_attempts(img: Image.Image, whitelist: Optional[str]) -> Iterable[Tuple[str, str]]:
+    attempts: list[Tuple[str, str]] = []
+
 
 
 def _collect_attempts(img: Image.Image, whitelist: Optional[str]) -> Iterable[Tuple[str, str]]:
