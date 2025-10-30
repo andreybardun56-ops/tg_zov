@@ -47,32 +47,33 @@ async def _loop(bot=None):
         # === 🧩 Проверка активных акций ===
         try:
             admin_id = ADMIN_IDS[0] if ADMIN_IDS else None
+            results = await check_all_events(
+                bot=bot if bot and admin_id else None,
+                admin_id=admin_id,
+            )
+
+            summary_lines = [
+                f"{'✅' if active else '⚠️'} {name}" for name, active in results.items()
+            ]
+            summary_text = "\n".join(summary_lines) or "нет данных"
+            logger.info("[SCHED] Результаты проверки акций:\n%s", summary_text)
+
+            if admin_id and bot:
+                summary = "📊 <b>Обновление статуса акций:</b>\n\n" + summary_text
+                try:
+                    await bot.send_message(admin_id, summary, parse_mode="HTML")
+                except Exception as e:
+                    logger.warning(f"[SCHED] Не удалось отправить отчёт админу: {e}")
+
             if admin_id:
-                results = await check_all_events(admin_id)
-                summary = "📊 <b>Обновление статуса акций:</b>\n\n"
-                for name, active in results.items():
-                    emoji = "✅" if active else "⚠️"
-                    summary += f"{emoji} {name}\n"
-
-                if bot:
-                    try:
-                        await bot.send_message(admin_id, summary, parse_mode="HTML")
-                    except Exception as e:
-                        logger.warning(f"[SCHED] Не удалось отправить отчёт админу: {e}")
-
-                logger.info("[SCHED] ✅ Проверка акций завершена")
+                logger.info("[SCHED] ✅ Проверка акций завершена (отчёт сформирован)")
             else:
-                logger.warning("[SCHED] Нет ADMIN_IDS, пропускаю проверку акций.")
+                logger.warning(
+                    "[SCHED] Список ADMIN_IDS пуст — отчёт не отправлен, но статусы обновлены."
+                )
         except Exception as e:
             logger.exception(f"[SCHED] Ошибка при проверке акций: {e}")
 
-        # === 🚀 Автоматический фарм пазлов ===
-        try:
-            logger.info("[SCHED] 🚀 Запуск farm_puzzles_for_all...")
-            await run_farm_puzzles_for_all(bot)
-            logger.info("[SCHED] ✅ Ежедневный фарм завершён")
-        except Exception as e:
-            logger.exception(f"[SCHED] Ошибка при запуске фарма: {e}")
         # === 🚀 Автоматический фарм пазлов ===
         try:
             logger.info("[SCHED] 🚀 Запуск farm_puzzles_for_all...")
