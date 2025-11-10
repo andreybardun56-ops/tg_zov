@@ -422,6 +422,8 @@ async def refresh_cookies_in_database(message: types.Message):
 
     progress_state = {"percent": 0.0, "done": 0, "total": 0}
 
+    progress_state = {"percent": 0.0, "done": 0, "total": 0}
+
     async def progress_update(percent: float, done: int, total: int):
         """Обновляет сообщение каждые 10%."""
         progress_state.update({"percent": percent, "done": done, "total": total})
@@ -441,6 +443,7 @@ async def refresh_cookies_in_database(message: types.Message):
                     parse_mode="HTML",
                     reply_markup=get_cookie_refresh_stop_inline(),
                 )
+                await status_msg.edit_text(text, parse_mode="HTML")
             except Exception:
                 pass  # если Telegram ограничил частоту обновлений
 
