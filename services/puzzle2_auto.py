@@ -787,7 +787,13 @@ async def main():
                     logger.error(f"[{acc.get('uid')}] ❌ Ошибка: {e}")
 
         tasks = [asyncio.create_task(worker(acc)) for acc in accounts]
-        await tqdm_asyncio.gather(*tasks, desc="Обработка аккаунтов", total=len(tasks))
+        try:
+            await tqdm_asyncio.gather(*tasks, desc="Обработка аккаунтов", total=len(tasks))
+        except asyncio.CancelledError:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
     # ✅ После обработки всех аккаунтов — пересчитываем общие итоги пазлов
     try:
