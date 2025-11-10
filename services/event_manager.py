@@ -109,7 +109,8 @@ async def run_full_event_cycle(bot=None, manual=False):
     # 2️⃣ Только если файл старый — обновляем статусы
     if need_refresh:
         logger.info("🔍 Проверяю и обновляю event_status.json через event_checker...")
-        await check_all_events(bot=bot)
+        admin_id = ADMIN_IDS[0] if ADMIN_IDS else None
+        await check_all_events(bot=bot, admin_id=admin_id)
 
     # 3️⃣ Загружаем актуальные данные
     event_status = {}

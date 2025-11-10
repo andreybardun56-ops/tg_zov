@@ -3,8 +3,9 @@ import asyncio
 import json
 import os
 from contextlib import suppress
-from datetime import datetime
-from typing import Optional
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Optional, Any, Dict
 
 from aiogram import Bot
 from aiogram.types import FSInputFile
@@ -12,10 +13,58 @@ from aiogram.types import FSInputFile
 from config import ADMIN_IDS
 from services.logger import logger
 from services import puzzle2_auto
+from services.event_checker import (
+    STATUS_FILE as EVENT_STATUS_FILE,
+    check_all_events,
+    get_event_status,
+)
 
 PUZZLE_SUMMARY = "data/puzzle_summary.json"
 IS_FARM_RUNNING = False  # 🔒 глобальный флаг, чтобы не запускать фарм повторно
 FARM_TASK: Optional[asyncio.Task] = None  # 🔗 ссылка на текущий таск фарма
+
+STATUS_MAX_AGE = timedelta(minutes=10)
+
+
+def _is_status_fresh() -> bool:
+    """Проверяет актуальность файла статуса акций."""
+    status_path = Path(EVENT_STATUS_FILE)
+    if not status_path.exists():
+        return False
+
+    try:
+        mtime = datetime.fromtimestamp(status_path.stat().st_mtime)
+    except OSError as e:
+        logger.warning(f"[FARM] ⚠️ Не удалось получить mtime event_status.json: {e}")
+        return False
+
+    return datetime.now() - mtime < STATUS_MAX_AGE
+
+
+async def ensure_puzzle_event_active(bot: Optional[Bot]) -> bool:
+    """Убеждаемся, что пазловая акция активна перед запуском фарма."""
+
+    is_active = await get_event_status("puzzle2")
+    status_fresh = _is_status_fresh()
+
+    if is_active and status_fresh:
+        return True
+
+    if not status_fresh:
+        logger.info("[FARM] ℹ️ Обновляю статусы акций перед запуском пазлов…")
+        try:
+            await check_all_events(bot=bot)
+        except Exception as e:
+            logger.warning(f"[FARM] ⚠️ Не удалось обновить статусы акций: {e}")
+        else:
+            is_active = await get_event_status("puzzle2")
+            if is_active:
+                return True
+
+    if not is_active:
+        logger.info("[FARM] ⏸ Акция Puzzle2 не активна — фарм не запускаем.")
+
+    return is_active
 
 
 async def read_puzzle_summary() -> dict:
@@ -89,7 +138,7 @@ async def stop_farm() -> bool:
     return True
 
 
-async def run_farm_puzzles_for_all(bot: Bot):
+async def run_farm_puzzles_for_all(bot: Optional[Bot] = None) -> Dict[str, Any]:
     """
     🚀 Запускает фарм пазлов:
     - вызывает puzzle2_auto.main()
@@ -101,6 +150,26 @@ async def run_farm_puzzles_for_all(bot: Bot):
     current_task = asyncio.current_task()
     if FARM_TASK is None and current_task is not None:
         FARM_TASK = current_task
+
+    is_active = await ensure_puzzle_event_active(bot)
+    if not is_active:
+        note = "⏸ <b>Puzzle2</b> ещё не активна. Фарм не запущен."
+        if bot:
+            for admin_id in ADMIN_IDS:
+                try:
+                    await bot.send_message(admin_id, note, parse_mode="HTML")
+                except Exception as e:
+                    logger.warning(f"[FARM] ⚠️ Не удалось уведомить {admin_id}: {e}")
+        FARM_TASK = None
+        return {
+            "success": False,
+            "message": note,
+            "duration_minutes": 0.0,
+            "was_cancelled": False,
+            "stop_requested": False,
+            "summary": {},
+            "error": None,
+        }
 
     # 🧹 Очистка старых данных перед новым запуском
     FILES_TO_CLEAR = [
@@ -125,32 +194,49 @@ async def run_farm_puzzles_for_all(bot: Bot):
     except Exception as e:
         logger.warning(f"[FARM] ⚠️ Не удалось очистить {PUZZLE_SUMMARY}: {e}")
     if IS_FARM_RUNNING:
-        for admin_id in ADMIN_IDS:
-            try:
-                await bot.send_message(admin_id, "⚙️ Фарм уже выполняется, подожди окончания ⏳")
-            except Exception:
-                pass
-        return
+        note = "⚙️ Фарм уже выполняется, подожди окончания ⏳"
+        if bot:
+            for admin_id in ADMIN_IDS:
+                try:
+                    await bot.send_message(admin_id, note)
+                except Exception:
+                    pass
+        return {
+            "success": False,
+            "message": note,
+            "duration_minutes": 0.0,
+            "was_cancelled": False,
+            "stop_requested": True,
+            "summary": {},
+            "error": None,
+        }
 
     IS_FARM_RUNNING = True
     start_time = datetime.now()
     logger.info("[FARM] 🚀 Запуск фарма пазлов")
 
     # Сообщаем всем админам о старте
-    msg_map = {}
-    for admin_id in ADMIN_IDS:
-        try:
-            msg = await bot.send_message(admin_id, "🧩 Фарм пазлов запущен! Собираем данные...")
-            logger.info(f"[FARM] 📩 Стартовое сообщение отправлено админу {admin_id}: id={msg.message_id}")
-            msg_map[admin_id] = msg
-        except Exception as e:
-            logger.warning(f"[FARM] Не удалось отправить стартовое сообщение админу {admin_id}: {e}")
+    msg_map: Dict[int, Any] = {}
+    if bot:
+        for admin_id in ADMIN_IDS:
+            try:
+                msg = await bot.send_message(admin_id, "🧩 Фарм пазлов запущен! Собираем данные...")
+                logger.info(
+                    f"[FARM] 📩 Стартовое сообщение отправлено админу {admin_id}: id={msg.message_id}"
+                )
+                msg_map[admin_id] = msg
+            except Exception as e:
+                logger.warning(f"[FARM] Не удалось отправить стартовое сообщение админу {admin_id}: {e}")
 
     async def progress_updater():
         """Периодически обновляет сообщение с прогрессом."""
         first_update_done = False
         logger.info("[FARM] 🔁 Прогресс-обновитель запущен")
         while IS_FARM_RUNNING:
+            if not bot or not msg_map:
+                await asyncio.sleep(15)
+                continue
+
             logger.info("[FARM] 🔄 Проверка puzzle_summary...")
             try:
                 data = await read_puzzle_summary()
@@ -182,6 +268,7 @@ async def run_farm_puzzles_for_all(bot: Bot):
     # 🔁 Запускаем фоновое обновление прогресса
     progress_task = asyncio.create_task(progress_updater())
     was_cancelled = False
+    error: Optional[Exception] = None
 
     try:
         await puzzle2_auto.main()
@@ -189,6 +276,7 @@ async def run_farm_puzzles_for_all(bot: Bot):
         was_cancelled = True
         logger.info("[FARM] 🛑 Получен сигнал на остановку фарма")
     except Exception as e:
+        error = e
         logger.exception(f"[FARM] Ошибка во время puzzle2_auto.main(): {e}")
     finally:
         IS_FARM_RUNNING = False
@@ -204,7 +292,20 @@ async def run_farm_puzzles_for_all(bot: Bot):
 
         # Итоговое сообщение
         data = await read_puzzle_summary()
-        if was_cancelled:
+        result_text = ""
+        success = False
+
+        if error is not None:
+            text = (
+                "❌ <b>Фарм пазлов завершился с ошибкой.</b>\n"
+                f"<code>{error}</code>\n\n"
+            )
+            if data:
+                text += format_puzzle_stats(data)
+            else:
+                text += f"⚠️ Нет данных в {PUZZLE_SUMMARY}"
+            result_text = text
+        elif was_cancelled or stop_requested:
             if data:
                 text = (
                     "🛑 <b>Фарм пазлов остановлен.</b>\n\n"
@@ -213,6 +314,7 @@ async def run_farm_puzzles_for_all(bot: Bot):
                 )
             else:
                 text = "🛑 Фарм пазлов остановлен пользователем."
+            result_text = text
         else:
             if data:
                 text = (
@@ -222,15 +324,28 @@ async def run_farm_puzzles_for_all(bot: Bot):
                 )
             else:
                 text = f"⚠️ Фарм завершён, но не удалось прочитать {PUZZLE_SUMMARY}"
+            result_text = text
+            success = True
 
-        for admin_id in ADMIN_IDS:
-            try:
-                await bot.send_message(admin_id, text, parse_mode="HTML")
-                if os.path.exists(PUZZLE_SUMMARY):
-                    document = FSInputFile(PUZZLE_SUMMARY)
-                    await bot.send_document(admin_id, document=document)
-            except Exception as e:
-                logger.warning(f"[FARM] Не удалось отправить итоги админу {admin_id}: {e}")
+        if bot:
+            for admin_id in ADMIN_IDS:
+                try:
+                    await bot.send_message(admin_id, result_text, parse_mode="HTML")
+                    if os.path.exists(PUZZLE_SUMMARY):
+                        document = FSInputFile(PUZZLE_SUMMARY)
+                        await bot.send_document(admin_id, document=document)
+                except Exception as e:
+                    logger.warning(f"[FARM] Не удалось отправить итоги админу {admin_id}: {e}")
 
         FARM_TASK = None
         logger.info("[FARM] 📦 Фарм пазлов полностью завершён")
+
+        return {
+            "success": success,
+            "message": result_text,
+            "duration_minutes": duration,
+            "was_cancelled": was_cancelled,
+            "stop_requested": stop_requested,
+            "summary": data or {},
+            "error": str(error) if error else None,
+        }
