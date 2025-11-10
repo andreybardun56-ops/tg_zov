@@ -40,10 +40,24 @@ USER_ACCOUNTS_FILE = "data/user_accounts.json"
 
 
 COOKIE_REFRESH_TASK: Optional[asyncio.Task] = None
+COOKIE_REFRESH_STATUS_MESSAGE: Optional[types.Message] = None
 
 
 def is_cookie_refresh_running() -> bool:
     return COOKIE_REFRESH_TASK is not None and not COOKIE_REFRESH_TASK.done()
+
+
+def get_cookie_refresh_stop_inline() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="⛔️ Остановить обновление cookies",
+                    callback_data="stop_refresh_cookies",
+                )
+            ]
+        ]
+    )
 # ----------------------------- 👥 Главное меню -----------------------------
 user_main_kb = ReplyKeyboardMarkup(
     keyboard=[
@@ -398,7 +412,15 @@ async def refresh_cookies_in_database(message: types.Message):
         )
         return
 
-    status_msg = await message.answer("🧩 Начинаю обновление cookies... ⏳")
+    global COOKIE_REFRESH_STATUS_MESSAGE
+
+    status_msg = await message.answer(
+        "🧩 Начинаю обновление cookies... ⏳",
+        reply_markup=get_cookie_refresh_stop_inline(),
+    )
+    COOKIE_REFRESH_STATUS_MESSAGE = status_msg
+
+    progress_state = {"percent": 0.0, "done": 0, "total": 0}
 
     progress_state = {"percent": 0.0, "done": 0, "total": 0}
 
@@ -415,6 +437,11 @@ async def refresh_cookies_in_database(message: types.Message):
                     "🧩 Обновление cookies...\n\n"
                     f"📊 Прогресс: <b>{percent*100:.1f}%</b>\n"
                     f"✅ Обработано: <b>{done}</b> из <b>{total}</b>"
+                )
+                await status_msg.edit_text(
+                    text,
+                    parse_mode="HTML",
+                    reply_markup=get_cookie_refresh_stop_inline(),
                 )
                 await status_msg.edit_text(text, parse_mode="HTML")
             except Exception:
@@ -446,16 +473,18 @@ async def refresh_cookies_in_database(message: types.Message):
                     "📁 Логи: <code>logs/login_refresh.log</code>"
                 )
 
-            await status_msg.edit_text(text, parse_mode="HTML")
+            await status_msg.edit_text(text, parse_mode="HTML", reply_markup=None)
         except Exception as e:
             was_stopped = login_and_refresh.is_stop_requested()
             await status_msg.edit_text(
                 f"❌ Ошибка при обновлении: <code>{e}</code>",
                 parse_mode="HTML",
+                reply_markup=None,
             )
         finally:
             login_and_refresh.clear_stop_request()
             COOKIE_REFRESH_TASK = None
+            COOKIE_REFRESH_STATUS_MESSAGE = None
             try:
                 await message.answer(
                     "⚙️ Меню управления:",
@@ -472,38 +501,69 @@ async def refresh_cookies_in_database(message: types.Message):
     )
 
 
-@router.message(F.text == "⛔️ Остановить обновление cookies")
-async def stop_refresh_cookies(message: types.Message):
-    """Запрашивает остановку фонового обновления cookies."""
-    if message.from_user.id not in ADMIN_IDS:
-        await message.answer("🚫 У тебя нет доступа к этой функции.")
-        return
+async def _handle_stop_cookie_refresh(user_id: int) -> str:
+    if user_id not in ADMIN_IDS:
+        return "🚫 У тебя нет доступа к этой функции."
 
     if not is_cookie_refresh_running():
-        await message.answer(
-            "⚠️ Обновление cookies сейчас не выполняется.",
-            reply_markup=get_admin_manage_menu(),
-        )
-        return
+        return "⚠️ Обновление cookies сейчас не выполняется."
 
     login_and_refresh.request_stop()
 
-    await message.answer(
-        "🛑 Запрос на остановку отправлен. Текущие аккаунты завершат работу и процесс остановится.",
-        reply_markup=get_admin_manage_menu(),
-    )
-
-    task = COOKIE_REFRESH_TASK
-    if task is not None:
+    status_msg = COOKIE_REFRESH_STATUS_MESSAGE
+    if status_msg is not None:
         try:
-            await task
+            await status_msg.edit_reply_markup(reply_markup=None)
         except Exception:
             pass
 
-    await message.answer(
-        "⚙️ Меню управления:",
-        reply_markup=get_admin_manage_menu(),
+    return (
+        "🛑 Запрос на остановку отправлен. "
+        "Текущие аккаунты завершат работу и процесс остановится."
     )
+
+
+@router.message(F.text == "⛔️ Остановить обновление cookies")
+async def stop_refresh_cookies(message: types.Message):
+    """Запрашивает остановку фонового обновления cookies."""
+    response = await _handle_stop_cookie_refresh(message.from_user.id)
+
+    await message.answer(response, reply_markup=get_admin_manage_menu())
+
+    if response.startswith("🛑"):
+        task = COOKIE_REFRESH_TASK
+        if task is not None:
+            try:
+                await task
+            except Exception:
+                pass
+
+        await message.answer(
+            "⚙️ Меню управления:",
+            reply_markup=get_admin_manage_menu(),
+        )
+
+
+@router.callback_query(F.data == "stop_refresh_cookies")
+async def stop_refresh_cookies_callback(callback: CallbackQuery):
+    response = await _handle_stop_cookie_refresh(callback.from_user.id)
+
+    await callback.answer()
+
+    await callback.message.answer(response, reply_markup=get_admin_manage_menu())
+
+    if response.startswith("🛑"):
+        task = COOKIE_REFRESH_TASK
+        if task is not None:
+            try:
+                await task
+            except Exception:
+                pass
+
+        await callback.message.answer(
+            "⚙️ Меню управления:",
+            reply_markup=get_admin_manage_menu(),
+        )
 
 # ------------------------------------ 🧩 Фарм пазлов ------------------------------------
 @router.message(F.text == "🧩 Фарм пазлов")
