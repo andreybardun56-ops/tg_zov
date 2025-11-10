@@ -8,9 +8,7 @@ from services.logger import logger
 from aiogram import Router, types, F
 from aiogram.filters import Command
 from aiogram.types import (
-    ReplyKeyboardMarkup, KeyboardButton,
-    InlineKeyboardMarkup, InlineKeyboardButton,
-    CallbackQuery
+    ReplyKeyboardMarkup, KeyboardButton, CallbackQuery,
 )
 from config import ADMIN_IDS
 from services import login_and_refresh
@@ -45,19 +43,6 @@ COOKIE_REFRESH_STATUS_MESSAGE: Optional[types.Message] = None
 
 def is_cookie_refresh_running() -> bool:
     return COOKIE_REFRESH_TASK is not None and not COOKIE_REFRESH_TASK.done()
-
-
-def get_cookie_refresh_stop_inline() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="⛔️ Остановить обновление cookies",
-                    callback_data="stop_refresh_cookies",
-                )
-            ]
-        ]
-    )
 # ----------------------------- 👥 Главное меню -----------------------------
 user_main_kb = ReplyKeyboardMarkup(
     keyboard=[
@@ -412,15 +397,10 @@ async def refresh_cookies_in_database(message: types.Message):
         )
         return
 
-    global COOKIE_REFRESH_STATUS_MESSAGE
+    global COOKIE_REFRESH_STATUS_MESSAGE, COOKIE_REFRESH_TASK
 
-    status_msg = await message.answer(
-        "🧩 Начинаю обновление cookies... ⏳",
-        reply_markup=get_cookie_refresh_stop_inline(),
-    )
+    status_msg = await message.answer("🧩 Начинаю обновление cookies... ⏳")
     COOKIE_REFRESH_STATUS_MESSAGE = status_msg
-
-    progress_state = {"percent": 0.0, "done": 0, "total": 0}
 
     progress_state = {"percent": 0.0, "done": 0, "total": 0}
 
@@ -473,13 +453,12 @@ async def refresh_cookies_in_database(message: types.Message):
                     "📁 Логи: <code>logs/login_refresh.log</code>"
                 )
 
-            await status_msg.edit_text(text, parse_mode="HTML", reply_markup=None)
+            await status_msg.edit_text(text, parse_mode="HTML")
         except Exception as e:
             was_stopped = login_and_refresh.is_stop_requested()
             await status_msg.edit_text(
                 f"❌ Ошибка при обновлении: <code>{e}</code>",
                 parse_mode="HTML",
-                reply_markup=None,
             )
         finally:
             login_and_refresh.clear_stop_request()
@@ -510,13 +489,6 @@ async def _handle_stop_cookie_refresh(user_id: int) -> str:
 
     login_and_refresh.request_stop()
 
-    status_msg = COOKIE_REFRESH_STATUS_MESSAGE
-    if status_msg is not None:
-        try:
-            await status_msg.edit_reply_markup(reply_markup=None)
-        except Exception:
-            pass
-
     return (
         "🛑 Запрос на остановку отправлен. "
         "Текущие аккаунты завершат работу и процесс остановится."
@@ -543,27 +515,6 @@ async def stop_refresh_cookies(message: types.Message):
             reply_markup=get_admin_manage_menu(),
         )
 
-
-@router.callback_query(F.data == "stop_refresh_cookies")
-async def stop_refresh_cookies_callback(callback: CallbackQuery):
-    response = await _handle_stop_cookie_refresh(callback.from_user.id)
-
-    await callback.answer()
-
-    await callback.message.answer(response, reply_markup=get_admin_manage_menu())
-
-    if response.startswith("🛑"):
-        task = COOKIE_REFRESH_TASK
-        if task is not None:
-            try:
-                await task
-            except Exception:
-                pass
-
-        await callback.message.answer(
-            "⚙️ Меню управления:",
-            reply_markup=get_admin_manage_menu(),
-        )
 
 # ------------------------------------ 🧩 Фарм пазлов ------------------------------------
 @router.message(F.text == "🧩 Фарм пазлов")
@@ -716,7 +667,6 @@ async def handle_puzzle_claim(callback: CallbackQuery):
     asyncio.create_task(run_claim())
 
 # ------------------------------------ ♻️ ОБМЕН ПАЗЛОВ ------------------------------------
-from aiogram.types import CallbackQuery
 import logging
 from services.puzzle_exchange_auto import get_fragment_count, exchange_item
 
