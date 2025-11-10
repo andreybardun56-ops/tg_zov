@@ -43,6 +43,7 @@ INACTIVE_MARKERS = [
     "has already ended",
     "please login again",
     "veuillez vous reconnecter",
+    "veullez vous reconnecter",
 ]
 
 
