@@ -421,7 +421,9 @@ async def refresh_cookies_in_database(message: types.Message):
                 await status_msg.edit_text(
                     text,
                     parse_mode="HTML",
+                    reply_markup=get_cookie_refresh_stop_inline(),
                 )
+                await status_msg.edit_text(text, parse_mode="HTML")
             except Exception:
                 pass  # если Telegram ограничил частоту обновлений
 
