@@ -39,6 +39,24 @@ logging.basicConfig(level=logging.INFO, handlers=[file_handler])
 
 file_locks: Dict[str, asyncio.Lock] = {}
 
+# === Глобальное управление остановкой массового обновления ===
+STOP_EVENT = asyncio.Event()
+
+
+def request_stop() -> None:
+    """Запрашивает остановку текущего массового обновления."""
+    STOP_EVENT.set()
+
+
+def clear_stop_request() -> None:
+    """Сбрасывает запрос на остановку перед новым запуском."""
+    STOP_EVENT.clear()
+
+
+def is_stop_requested() -> bool:
+    """Проверяет, был ли запрошен останов массового обновления."""
+    return STOP_EVENT.is_set()
+
 # === JSON helpers ===
 def atomic_write_json(path: Path, data):
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -186,7 +204,14 @@ async def update_account_in_newdata(file_path: Path, original_acc: Dict[str, Any
 
 # === Логин одного аккаунта ===
 async def process_single_account(playwright, sem, file_path: Path, account: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if STOP_EVENT.is_set():
+        logger.info("[STOP] Пропуск аккаунта из-за запроса остановки: %s", file_path.name)
+        return None
+
     async with sem:
+        if STOP_EVENT.is_set():
+            logger.info("[STOP] Остановка перед началом обработки аккаунта из %s", file_path.name)
+            return None
         mail = account.get("mail") or account.get("email") or account.get("user")
         passwd = account.get("paswd") or account.get("password") or account.get("pass")
 
@@ -337,6 +362,9 @@ async def process_single_account(playwright, sem, file_path: Path, account: Dict
             await asyncio.sleep(DELAY_AFTER_SUCCESS)
             return {"uid": str(uid), "cookies": cookies_flat}
 
+        except asyncio.CancelledError:
+            logger.info(f"[CANCEL] Остановка обработки {mail} из-за отмены задачи")
+            raise
         except PWError as e:
             logger.exception(f"[ERROR] {mail} — playwright error: {e}")
             return None
@@ -361,6 +389,10 @@ async def process_all_files(progress_callback: Optional[Callable[[float, int, in
     files = [p for p in DATA_DIR.iterdir() if p.suffix == ".json" and p.name.startswith("new_data")]
     if not files:
         logger.error("Нет JSON-файлов вида new_data*.json для обработки.")
+        return None
+
+    if STOP_EVENT.is_set():
+        logger.info("[STOP] Обновление cookies остановлено до начала обработки")
         return None
 
     # === собираем все аккаунты ===
@@ -399,12 +431,23 @@ async def process_all_files(progress_callback: Optional[Callable[[float, int, in
         sem = asyncio.Semaphore(CONCURRENT)
         tasks = []
         for file_path, accounts in file_to_accounts.items():
+            if STOP_EVENT.is_set():
+                logger.info("[STOP] Прекращаю постановку аккаунтов в очередь")
+                break
             for acc in accounts:
+                if STOP_EVENT.is_set():
+                    logger.info("[STOP] Остановка добавления аккаунтов для обработки")
+                    break
                 tasks.append(asyncio.create_task(process_single_account(pw, sem, file_path, acc)))
+            if STOP_EVENT.is_set():
+                break
 
         # цикл прогресса
         for coro in asyncio.as_completed(tasks):
-            await coro
+            try:
+                await coro
+            except asyncio.CancelledError:
+                continue
             completed += 1
 
             percent = completed / total_accounts
@@ -421,16 +464,32 @@ async def process_all_files(progress_callback: Optional[Callable[[float, int, in
             )
             sys.stdout.flush()
 
+            if progress_callback:
+                try:
+                    await progress_callback(percent, completed, total_accounts)
+                except Exception:
+                    pass
+
+            if STOP_EVENT.is_set():
+                logger.info("[STOP] Получен запрос на остановку — отменяем оставшиеся задачи")
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                break
+
         total_time = time.time() - start_time
-        sys.stdout.write(
-            f"\r✅ [████████████████████] 100% | Все аккаунты обработаны за {total_time / 60:.1f} мин.\n"
-        )
-        sys.stdout.flush()
+        if not STOP_EVENT.is_set():
+            sys.stdout.write(
+                f"\r✅ [████████████████████] 100% | Все аккаунты обработаны за {total_time / 60:.1f} мин.\n"
+            )
+            sys.stdout.flush()
 
         # ✅ вызываем callback после обработки всех аккаунтов (можно и убрать)
         if progress_callback:
             try:
-                await progress_callback(1.0, completed, total_accounts)
+                final_percent = 1.0 if not STOP_EVENT.is_set() else completed / total_accounts
+                await progress_callback(final_percent, completed, total_accounts)
             except Exception:
                 pass
 
