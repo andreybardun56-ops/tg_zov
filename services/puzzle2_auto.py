@@ -34,6 +34,24 @@ except RuntimeError:
     asyncio.set_event_loop(loop)
 loop.set_exception_handler(silence_asyncio_exceptions)
 
+# Глобальный флаг остановки для аккуратного завершения фарма
+STOP_EVENT = asyncio.Event()
+
+
+def request_stop() -> None:
+    """Помечает, что нужно остановить текущую обработку аккаунтов."""
+    STOP_EVENT.set()
+
+
+def is_stop_requested() -> bool:
+    """Возвращает True, если поступил сигнал на остановку."""
+    return STOP_EVENT.is_set()
+
+
+def clear_stop_request() -> None:
+    """Сбрасывает флаг остановки (используется при новом запуске)."""
+    STOP_EVENT.clear()
+
 # 🔇 Подавляем лишние предупреждения из Playwright и asyncio
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 logging.getLogger("asyncio").setLevel(logging.ERROR)
@@ -766,6 +784,7 @@ async def process_account(account: Dict[str, Any], p) -> None:
         await asyncio.sleep(jitter(DELAY_BETWEEN_ACCOUNTS, variance=0.6))
 # ---------------- main ----------------
 async def main():
+    clear_stop_request()
     accounts = load_accounts()
     if not accounts:
         logger.error("Аккаунты не найдены в %s", DATA_DIR)
@@ -778,7 +797,14 @@ async def main():
     async with async_playwright() as p:
 
         async def worker(acc):
+            uid = acc.get("uid")
+            if STOP_EVENT.is_set():
+                logger.info("[%s] ⏹ Пропуск аккаунта: получен сигнал остановки", uid)
+                return
             async with sem:
+                if STOP_EVENT.is_set():
+                    logger.info("[%s] ⏹ Завершаем перед стартом обработки", uid)
+                    return
                 try:
                     await process_account(acc, p)
                     stats["success"] += 1

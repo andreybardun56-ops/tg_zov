@@ -200,6 +200,8 @@ async def run_farm_puzzles_for_all(bot: Bot):
         duration = (end_time - start_time).total_seconds() / 60
         logger.info(f"[FARM] ✅ Фарм завершён за {duration:.1f} мин.")
 
+        stop_requested = was_cancelled or puzzle2_auto.is_stop_requested()
+
         # Итоговое сообщение
         data = await read_puzzle_summary()
         if was_cancelled:
