@@ -9,6 +9,7 @@ from typing import Dict, Tuple, Optional
 from playwright.async_api import async_playwright
 
 from services.browser_patches import (
+    BROWSER_PATH,
     get_random_browser_profile,
     launch_masked_persistent_context,
     cookies_to_playwright,
@@ -16,7 +17,6 @@ from services.browser_patches import (
 
 logger = logging.getLogger("event_checker")
 
-BROWSER_PATH = r".venv/Chrome/Application/chrome.exe"
 PROFILE_DIR = Path("data/chrome_profiles")
 PROFILE_DIR.mkdir(parents=True, exist_ok=True)
 

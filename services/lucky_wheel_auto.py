@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Optional, Callable
 from playwright.async_api import async_playwright
 from services.browser_patches import (
+    BROWSER_PATH,
     get_random_browser_profile,
     launch_masked_persistent_context,
     cookies_to_playwright,
@@ -13,7 +14,6 @@ from services.browser_patches import (
 from services.cookies_io import load_all_cookies, save_all_cookies
 
 # === Настройки ===
-BROWSER_PATH = r".venv/Chrome/Application/chrome.exe"
 FAIL_DIR = Path("data/fails/lucky_wheel")
 FAIL_DIR.mkdir(parents=True, exist_ok=True)
 
