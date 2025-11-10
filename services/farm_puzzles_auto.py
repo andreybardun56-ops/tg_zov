@@ -2,14 +2,20 @@
 import asyncio
 import json
 import os
+from contextlib import suppress
 from datetime import datetime
+from typing import Optional
+
 from aiogram import Bot
+from aiogram.types import FSInputFile
+
 from config import ADMIN_IDS
 from services.logger import logger
 from services import puzzle2_auto
 
 PUZZLE_SUMMARY = "data/puzzle_summary.json"
 IS_FARM_RUNNING = False  # 🔒 глобальный флаг, чтобы не запускать фарм повторно
+FARM_TASK: Optional[asyncio.Task] = None  # 🔗 ссылка на текущий таск фарма
 
 
 async def read_puzzle_summary() -> dict:
@@ -45,6 +51,50 @@ def format_puzzle_stats(data: dict) -> str:
     return text
 
 
+def is_farm_running() -> bool:
+    """Возвращает True, если фарм уже запущен."""
+    return IS_FARM_RUNNING or (FARM_TASK is not None and not FARM_TASK.done())
+
+
+async def start_farm(bot: Bot) -> bool:
+    """Создаёт таск фарма, если он ещё не запущен."""
+    global FARM_TASK
+    if is_farm_running():
+        return False
+
+    FARM_TASK = asyncio.create_task(run_farm_puzzles_for_all(bot))
+    return True
+
+
+async def stop_farm() -> bool:
+    """Останавливает текущий фарм, если он выполняется."""
+    global FARM_TASK
+
+    if FARM_TASK is None:
+        return False
+
+    if FARM_TASK.done():
+        FARM_TASK = None
+        return False
+
+    puzzle2_auto.request_stop()
+    task = FARM_TASK
+    logger.info("[FARM] ⏹ Запрошена остановка фарма, ждём завершения текущих задач")
+
+    try:
+        await asyncio.wait_for(task, timeout=60)
+        logger.info("[FARM] ⏱ Фарм завершился корректно после запроса остановки")
+    except asyncio.TimeoutError:
+        logger.warning("[FARM] ⏳ Не дождались завершения за 60 сек — принудительно отменяем")
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+    finally:
+        FARM_TASK = None
+
+    return True
+
+
 async def run_farm_puzzles_for_all(bot: Bot):
     """
     🚀 Запускает фарм пазлов:
@@ -52,7 +102,12 @@ async def run_farm_puzzles_for_all(bot: Bot):
     - обновляет прогресс каждые 15 сек
     - по завершении отправляет итог
     """
-    global IS_FARM_RUNNING
+    global IS_FARM_RUNNING, FARM_TASK
+
+    current_task = asyncio.current_task()
+    if FARM_TASK is None and current_task is not None:
+        FARM_TASK = current_task
+
     # 🧹 Очистка старых данных перед новым запуском
     FILES_TO_CLEAR = [
         "data/puzzle_summary.json",
@@ -132,36 +187,60 @@ async def run_farm_puzzles_for_all(bot: Bot):
 
     # 🔁 Запускаем фоновое обновление прогресса
     progress_task = asyncio.create_task(progress_updater())
+    was_cancelled = False
+
+    # Сбрасываем флаг остановки перед запуском и фиксируем его состояние на выходе
+    puzzle2_auto.clear_stop_request()
 
     try:
         await puzzle2_auto.main()
+    except asyncio.CancelledError:
+        was_cancelled = True
+        logger.info("[FARM] 🛑 Получен сигнал на остановку фарма")
     except Exception as e:
         logger.exception(f"[FARM] Ошибка во время puzzle2_auto.main(): {e}")
     finally:
         IS_FARM_RUNNING = False
         progress_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await progress_task
 
         end_time = datetime.now()
         duration = (end_time - start_time).total_seconds() / 60
         logger.info(f"[FARM] ✅ Фарм завершён за {duration:.1f} мин.")
 
+        stop_requested = was_cancelled or puzzle2_auto.is_stop_requested()
+
         # Итоговое сообщение
         data = await read_puzzle_summary()
-        if data:
-            text = (
-                "✅ <b>Фарм пазлов завершён!</b>\n\n"
-                + format_puzzle_stats(data)
-                + f"\n\n🕓 Время выполнения: <code>{duration:.1f} мин</code>"
-            )
+        if stop_requested:
+            if data:
+                text = (
+                    "🛑 <b>Фарм пазлов остановлен.</b>\n\n"
+                    + format_puzzle_stats(data)
+                    + f"\n\n🕓 В работе до остановки: <code>{duration:.1f} мин</code>"
+                )
+            else:
+                text = "🛑 Фарм пазлов остановлен пользователем."
         else:
-            text = f"⚠️ Фарм завершён, но не удалось прочитать {PUZZLE_SUMMARY}"
+            if data:
+                text = (
+                    "✅ <b>Фарм пазлов завершён!</b>\n\n"
+                    + format_puzzle_stats(data)
+                    + f"\n\n🕓 Время выполнения: <code>{duration:.1f} мин</code>"
+                )
+            else:
+                text = f"⚠️ Фарм завершён, но не удалось прочитать {PUZZLE_SUMMARY}"
 
         for admin_id in ADMIN_IDS:
             try:
                 await bot.send_message(admin_id, text, parse_mode="HTML")
                 if os.path.exists(PUZZLE_SUMMARY):
-                    await bot.send_document(admin_id, document=open(PUZZLE_SUMMARY, "rb"))
+                    document = FSInputFile(PUZZLE_SUMMARY)
+                    await bot.send_document(admin_id, document=document)
             except Exception as e:
                 logger.warning(f"[FARM] Не удалось отправить итоги админу {admin_id}: {e}")
 
+        puzzle2_auto.clear_stop_request()
+        FARM_TASK = None
         logger.info("[FARM] 📦 Фарм пазлов полностью завершён")

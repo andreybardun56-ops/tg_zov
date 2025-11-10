@@ -18,7 +18,11 @@ from services.puzzle_claim_auto import claim_puzzle
 from services.puzzle_claim import issue_puzzle_codes
 from services.dragon_quest import run_dragon_quest
 from services.accounts_manager import load_all_users
-from services.farm_puzzles_auto import run_farm_puzzles_for_all
+from services.farm_puzzles_auto import (
+    is_farm_running,
+    start_farm,
+    stop_farm,
+)
 from services.castle_api import extract_player_info_from_page, refresh_cookies_mvp
 from services.event_manager import run_full_event_cycle
 from keyboards.inline import (
@@ -77,17 +81,19 @@ admin_events_menu = ReplyKeyboardMarkup(
 )
 
 # 🧩 Подменю пазлов
-admin_puzzles_menu = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="━━━━━━━━━━━ 🧩 Пазлы ━━━━━━━━━━━")],
-        [
-            KeyboardButton(text="🧩 Получить пазлы"),
-            KeyboardButton(text="🧩 Фарм пазлов")
+def get_admin_puzzles_menu() -> ReplyKeyboardMarkup:
+    farm_button_text = "⛔️ Остановить фарм" if is_farm_running() else "🧩 Фарм пазлов"
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="━━━━━━━━━━━ 🧩 Пазлы ━━━━━━━━━━━")],
+            [
+                KeyboardButton(text="🧩 Получить пазлы"),
+                KeyboardButton(text=farm_button_text)
+            ],
+            [KeyboardButton(text="🔙 Назад к событиям")]
         ],
-        [KeyboardButton(text="🔙 Назад к событиям")]
-    ],
-    resize_keyboard=True
-)
+        resize_keyboard=True
+    )
 
 # ⚙️ Управление
 admin_manage_menu = ReplyKeyboardMarkup(
@@ -153,7 +159,7 @@ async def open_events_menu(message: types.Message):
 
 @router.message(F.text == "🧩 Пазлы (подменю)")
 async def open_puzzles_submenu(message: types.Message):
-    await message.answer("🧩 Меню пазлов и мини-игр:", reply_markup=admin_puzzles_menu)
+    await message.answer("🧩 Меню пазлов и мини-игр:", reply_markup=get_admin_puzzles_menu())
 
 @router.message(F.text == "🔙 Назад к событиям")
 async def back_to_events(message: types.Message):
@@ -407,8 +413,38 @@ async def start_farm_puzzles(message: types.Message):
         await message.answer("🚫 У тебя нет доступа к этой функции.")
         return
 
-    await message.answer("⏳ Запускаю фарм пазлов... Это может занять несколько минут.")
-    asyncio.create_task(run_farm_puzzles_for_all(message.bot))  # 🔥 асинхронно, бот не блокируется
+    started = await start_farm(message.bot)
+    if started:
+        await message.answer(
+            "⏳ Запускаю фарм пазлов... Это может занять несколько минут.",
+            reply_markup=get_admin_puzzles_menu()
+        )
+    else:
+        await message.answer(
+            "⚙️ Фарм уже выполняется. Используй кнопку ниже, чтобы остановить его.",
+            reply_markup=get_admin_puzzles_menu()
+        )
+
+
+@router.message(F.text == "⛔️ Остановить фарм")
+async def stop_farm_puzzles(message: types.Message):
+    """Останавливает текущий фарм пазлов."""
+    user_id = message.from_user.id
+    if user_id not in ADMIN_IDS:
+        await message.answer("🚫 У тебя нет доступа к этой функции.")
+        return
+
+    stopped = await stop_farm()
+    if stopped:
+        await message.answer(
+            "🛑 Останавливаю фарм пазлов... Подожди пару секунд.",
+            reply_markup=get_admin_puzzles_menu()
+        )
+    else:
+        await message.answer(
+            "⚠️ Фарм сейчас не запущен.",
+            reply_markup=get_admin_puzzles_menu()
+        )
 
 # --- Подменю "Пазлы" (reply-кнопки) ---
 puzzle_submenu = ReplyKeyboardMarkup(
