@@ -367,6 +367,9 @@ async def process_single_account(playwright, sem, file_path: Path, account: Dict
             await asyncio.sleep(DELAY_AFTER_SUCCESS)
             return {"uid": str(uid), "cookies": cookies_flat}
 
+        except asyncio.CancelledError:
+            logger.info(f"[CANCEL] Остановка обработки {mail} из-за отмены задачи")
+            raise
         except PWError as e:
             logger.exception(f"[ERROR] {mail} — playwright error: {e}")
             return None
@@ -391,6 +394,10 @@ async def process_all_files(progress_callback: Optional[Callable[[float, int, in
     files = [p for p in DATA_DIR.iterdir() if p.suffix == ".json" and p.name.startswith("new_data")]
     if not files:
         logger.error("Нет JSON-файлов вида new_data*.json для обработки.")
+        return None
+
+    if STOP_EVENT.is_set():
+        logger.info("[STOP] Обновление cookies остановлено до начала обработки")
         return None
 
     # === собираем все аккаунты ===
@@ -435,6 +442,8 @@ async def process_all_files(progress_callback: Optional[Callable[[float, int, in
                 if is_stop_requested():
                     break
                 tasks.append(asyncio.create_task(process_single_account(pw, sem, file_path, acc)))
+            if STOP_EVENT.is_set():
+                break
 
         if not tasks:
             return None

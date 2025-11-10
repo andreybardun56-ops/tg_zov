@@ -8,9 +8,7 @@ from services.logger import logger
 from aiogram import Router, types, F
 from aiogram.filters import Command
 from aiogram.types import (
-    ReplyKeyboardMarkup, KeyboardButton,
-    InlineKeyboardMarkup, InlineKeyboardButton,
-    CallbackQuery
+    ReplyKeyboardMarkup, KeyboardButton, CallbackQuery,
 )
 from config import ADMIN_IDS
 from services import login_and_refresh
@@ -649,7 +647,6 @@ async def handle_puzzle_claim(callback: CallbackQuery):
     asyncio.create_task(run_claim())
 
 # ------------------------------------ ♻️ ОБМЕН ПАЗЛОВ ------------------------------------
-from aiogram.types import CallbackQuery
 import logging
 from services.puzzle_exchange_auto import get_fragment_count, exchange_item
 
