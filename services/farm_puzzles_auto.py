@@ -270,6 +270,8 @@ async def run_farm_puzzles_for_all(bot: Optional[Bot] = None) -> Dict[str, Any]:
     was_cancelled = False
     error: Optional[Exception] = None
 
+    result: Dict[str, Any]
+
     try:
         await puzzle2_auto.main()
     except asyncio.CancelledError:
@@ -340,7 +342,7 @@ async def run_farm_puzzles_for_all(bot: Optional[Bot] = None) -> Dict[str, Any]:
         FARM_TASK = None
         logger.info("[FARM] 📦 Фарм пазлов полностью завершён")
 
-        return {
+        result = {
             "success": success,
             "message": result_text,
             "duration_minutes": duration,
@@ -349,3 +351,5 @@ async def run_farm_puzzles_for_all(bot: Optional[Bot] = None) -> Dict[str, Any]:
             "summary": data or {},
             "error": str(error) if error else None,
         }
+
+    return result
