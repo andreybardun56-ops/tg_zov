@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Optional
 
 from aiogram import Bot
+from aiogram.types import FSInputFile
 
 from config import ADMIN_IDS
 from services.logger import logger
@@ -76,11 +77,18 @@ async def stop_farm() -> bool:
         FARM_TASK = None
         return False
 
-    FARM_TASK.cancel()
+    puzzle2_auto.request_stop()
+    task = FARM_TASK
+    logger.info("[FARM] ⏹ Запрошена остановка фарма, ждём завершения текущих задач")
+
     try:
-        await FARM_TASK
-    except asyncio.CancelledError:
-        pass
+        await asyncio.wait_for(task, timeout=60)
+        logger.info("[FARM] ⏱ Фарм завершился корректно после запроса остановки")
+    except asyncio.TimeoutError:
+        logger.warning("[FARM] ⏳ Не дождались завершения за 60 сек — принудительно отменяем")
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
     finally:
         FARM_TASK = None
 
@@ -181,6 +189,9 @@ async def run_farm_puzzles_for_all(bot: Bot):
     progress_task = asyncio.create_task(progress_updater())
     was_cancelled = False
 
+    # Сбрасываем флаг остановки перед запуском и фиксируем его состояние на выходе
+    puzzle2_auto.clear_stop_request()
+
     try:
         await puzzle2_auto.main()
     except asyncio.CancelledError:
@@ -198,9 +209,11 @@ async def run_farm_puzzles_for_all(bot: Bot):
         duration = (end_time - start_time).total_seconds() / 60
         logger.info(f"[FARM] ✅ Фарм завершён за {duration:.1f} мин.")
 
+        stop_requested = was_cancelled or puzzle2_auto.is_stop_requested()
+
         # Итоговое сообщение
         data = await read_puzzle_summary()
-        if was_cancelled:
+        if stop_requested:
             if data:
                 text = (
                     "🛑 <b>Фарм пазлов остановлен.</b>\n\n"
@@ -223,10 +236,11 @@ async def run_farm_puzzles_for_all(bot: Bot):
             try:
                 await bot.send_message(admin_id, text, parse_mode="HTML")
                 if os.path.exists(PUZZLE_SUMMARY):
-                    with open(PUZZLE_SUMMARY, "rb") as document:
-                        await bot.send_document(admin_id, document=document)
+                    document = FSInputFile(PUZZLE_SUMMARY)
+                    await bot.send_document(admin_id, document=document)
             except Exception as e:
                 logger.warning(f"[FARM] Не удалось отправить итоги админу {admin_id}: {e}")
 
+        puzzle2_auto.clear_stop_request()
         FARM_TASK = None
         logger.info("[FARM] 📦 Фарм пазлов полностью завершён")
