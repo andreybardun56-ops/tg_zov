@@ -204,13 +204,11 @@ async def update_account_in_newdata(file_path: Path, original_acc: Dict[str, Any
 
 # === Логин одного аккаунта ===
 async def process_single_account(playwright, sem, file_path: Path, account: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    if STOP_EVENT.is_set():
-        logger.info("[STOP] Пропуск аккаунта из-за запроса остановки: %s", file_path.name)
+    if is_stop_requested():
         return None
 
     async with sem:
-        if STOP_EVENT.is_set():
-            logger.info("[STOP] Остановка перед началом обработки аккаунта из %s", file_path.name)
+        if is_stop_requested():
             return None
         mail = account.get("mail") or account.get("email") or account.get("user")
         passwd = account.get("paswd") or account.get("password") or account.get("pass")
@@ -223,6 +221,9 @@ async def process_single_account(playwright, sem, file_path: Path, account: Dict
         context = None
         try:
             logger.info(f"[START] {file_path.name} → {mail}")
+            if is_stop_requested():
+                return None
+
             browser = await playwright.chromium.launch(headless=True, slow_mo=SLOW_MO)
             context = await browser.new_context()
             page = await context.new_page()
@@ -326,6 +327,8 @@ async def process_single_account(playwright, sem, file_path: Path, account: Dict
 
             start_time = time.time()
             while time.time() - start_time < cookie_capture_timeout:
+                if is_stop_requested():
+                    return None
                 cookies = await context.cookies()
                 cookies_flat = cookies_list_to_flat_dict(cookies)
                 token_value = cookies_flat.get("gpc_sso_token")
@@ -341,6 +344,8 @@ async def process_single_account(playwright, sem, file_path: Path, account: Dict
                     await page.goto("https://castleclash.igg.com", timeout=15000)
                     await asyncio.sleep(2)
                     for _ in range(5):
+                        if is_stop_requested():
+                            return None
                         cookies = await context.cookies()
                         cookies_flat = cookies_list_to_flat_dict(cookies)
                         token_value = cookies_flat.get("gpc_sso_token")
@@ -431,26 +436,31 @@ async def process_all_files(progress_callback: Optional[Callable[[float, int, in
         sem = asyncio.Semaphore(CONCURRENT)
         tasks = []
         for file_path, accounts in file_to_accounts.items():
-            if STOP_EVENT.is_set():
-                logger.info("[STOP] Прекращаю постановку аккаунтов в очередь")
+            if is_stop_requested():
                 break
             for acc in accounts:
-                if STOP_EVENT.is_set():
-                    logger.info("[STOP] Остановка добавления аккаунтов для обработки")
+                if is_stop_requested():
                     break
                 tasks.append(asyncio.create_task(process_single_account(pw, sem, file_path, acc)))
             if STOP_EVENT.is_set():
                 break
 
-        # цикл прогресса
+        if not tasks:
+            return None
+
+        stop_triggered = False
+
         for coro in asyncio.as_completed(tasks):
             try:
                 await coro
             except asyncio.CancelledError:
                 continue
-            completed += 1
+            except Exception as exc:
+                logger.exception(f"[PROCESS] Ошибка обработки аккаунта: {exc}")
+            else:
+                completed += 1
 
-            percent = completed / total_accounts
+            percent = completed / total_accounts if total_accounts else 0
             filled = int(percent * 20)
             bar = "█" * filled + "-" * (20 - filled)
 
@@ -470,28 +480,32 @@ async def process_all_files(progress_callback: Optional[Callable[[float, int, in
                 except Exception:
                     pass
 
-            if STOP_EVENT.is_set():
-                logger.info("[STOP] Получен запрос на остановку — отменяем оставшиеся задачи")
+            if is_stop_requested():
+                stop_triggered = True
                 for task in tasks:
                     if not task.done():
                         task.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
                 break
 
+        await asyncio.gather(*tasks, return_exceptions=True)
+
         total_time = time.time() - start_time
-        if not STOP_EVENT.is_set():
+
+        if stop_triggered:
+            sys.stdout.write(
+                f"\n🛑 Обновление остановлено пользователем на {completed}/{total_accounts} аккаунтах.\n"
+            )
+        else:
             sys.stdout.write(
                 f"\r✅ [████████████████████] 100% | Все аккаунты обработаны за {total_time / 60:.1f} мин.\n"
             )
-            sys.stdout.flush()
+            if progress_callback:
+                try:
+                    await progress_callback(1.0, completed, total_accounts)
+                except Exception:
+                    pass
 
-        # ✅ вызываем callback после обработки всех аккаунтов (можно и убрать)
-        if progress_callback:
-            try:
-                final_percent = 1.0 if not STOP_EVENT.is_set() else completed / total_accounts
-                await progress_callback(final_percent, completed, total_accounts)
-            except Exception:
-                pass
+        sys.stdout.flush()
 
     return None
 

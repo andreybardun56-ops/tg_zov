@@ -405,30 +405,25 @@ async def refresh_cookies_in_database(message: types.Message):
     progress_state = {"percent": 0.0, "done": 0, "total": 0}
 
     async def progress_update(percent: float, done: int, total: int):
-        """Обновляет сообщение каждые 10%."""
+        """Обновляет сообщение каждые 5%."""
         progress_state.update({"percent": percent, "done": done, "total": total})
 
         if total == 0:
             return
 
-        if int(percent * 100) % 5 == 0:  # каждые 5 %
+        if int(percent * 100) % 5 == 0:
             try:
                 text = (
                     "🧩 Обновление cookies...\n\n"
                     f"📊 Прогресс: <b>{percent*100:.1f}%</b>\n"
                     f"✅ Обработано: <b>{done}</b> из <b>{total}</b>"
                 )
-                await status_msg.edit_text(
-                    text,
-                    parse_mode="HTML",
-                    reply_markup=get_cookie_refresh_stop_inline(),
-                )
                 await status_msg.edit_text(text, parse_mode="HTML")
             except Exception:
-                pass  # если Telegram ограничил частоту обновлений
+                pass
 
     async def run_update():
-        global COOKIE_REFRESH_TASK
+        global COOKIE_REFRESH_TASK, COOKIE_REFRESH_STATUS_MESSAGE
         was_stopped = False
         try:
             login_and_refresh.clear_stop_request()
@@ -480,41 +475,26 @@ async def refresh_cookies_in_database(message: types.Message):
     )
 
 
-async def _handle_stop_cookie_refresh(user_id: int) -> str:
-    if user_id not in ADMIN_IDS:
-        return "🚫 У тебя нет доступа к этой функции."
-
-    if not is_cookie_refresh_running():
-        return "⚠️ Обновление cookies сейчас не выполняется."
-
-    login_and_refresh.request_stop()
-
-    return (
-        "🛑 Запрос на остановку отправлен. "
-        "Текущие аккаунты завершат работу и процесс остановится."
-    )
-
-
 @router.message(F.text == "⛔️ Остановить обновление cookies")
 async def stop_refresh_cookies(message: types.Message):
     """Запрашивает остановку фонового обновления cookies."""
-    response = await _handle_stop_cookie_refresh(message.from_user.id)
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("🚫 У тебя нет доступа к этой функции.")
+        return
 
-    await message.answer(response, reply_markup=get_admin_manage_menu())
-
-    if response.startswith("🛑"):
-        task = COOKIE_REFRESH_TASK
-        if task is not None:
-            try:
-                await task
-            except Exception:
-                pass
-
+    if not is_cookie_refresh_running():
         await message.answer(
-            "⚙️ Меню управления:",
+            "⚠️ Обновление cookies сейчас не выполняется.",
             reply_markup=get_admin_manage_menu(),
         )
+        return
 
+    login_and_refresh.request_stop()
+
+    await message.answer(
+        "🛑 Запрос на остановку отправлен. Текущие аккаунты завершат работу и процесс остановится.",
+        reply_markup=get_admin_manage_menu(),
+    )
 
 # ------------------------------------ 🧩 Фарм пазлов ------------------------------------
 @router.message(F.text == "🧩 Фарм пазлов")
