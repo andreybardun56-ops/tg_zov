@@ -11,6 +11,7 @@ from typing import Optional, Dict, Any, Tuple, List
 from playwright.async_api import async_playwright
 from services.logger import logger
 from services.browser_patches import (
+    BROWSER_PATH,
     get_random_browser_profile,
     humanize_pre_action,
     cookies_to_playwright,
@@ -20,7 +21,6 @@ from services.browser_patches import (
 # === Пути и настройки ===
 COOKIES_FILE = Path("data/cookies.json")
 PUZZLE_DATA_FILE = Path("data/puzzle_data.jsonl")
-BROWSER_PATH = r".venv/Chrome/Application/chrome.exe"
 EVENT_PAGE = "https://event-eu-cc.igg.com/event/puzzle2/"
 EVENT_API = f"{EVENT_PAGE}ajax.req.php"
 PROFILE_DIR = Path("data/chrome_profiles")

@@ -23,6 +23,8 @@ import json
 import logging
 import os
 import random
+import platform
+import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -35,48 +37,57 @@ logger = logging.getLogger("browser_patches")
 # ───────────────────────────────────────────────
 # 📁 Пути и глобальные параметры
 # ───────────────────────────────────────────────
-import platform
-import glob
-import subprocess
 
-def detect_chromium_path() -> str:
-    system = platform.system()
-    if system == "Windows":
-        return r".venv/Chrome/Application/chrome.exe"
-    elif system == "Darwin":  # macOS
-        path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-        return path if os.path.exists(path) else None
-    else:  # Linux / Ubuntu
-        # 1️⃣ пробуем системный Chrome
-        for path in [
+
+def detect_chromium_path() -> str | None:
+    """
+    🔍 Универсальный поиск пути к Chrome/Chromium
+    Работает на Windows, Linux, macOS и Android/Termux.
+    Возвращает None — если нужно, чтобы Playwright сам выбрал встроенный Chromium.
+    """
+    system = platform.system().lower()
+    candidates = []
+
+    # 🪟 Windows
+    if "windows" in system:
+        candidates += [
+            r".venv/Chrome/Application/chrome.exe",
+            r"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+            r"C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+        ]
+
+    # 🍎 macOS
+    elif "darwin" in system:
+        candidates += [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/usr/local/bin/chromium",
+        ]
+
+    # 🐧 Linux / Ubuntu / Debian / Termux
+    else:
+        candidates += [
+            shutil.which("google-chrome-stable"),
+            shutil.which("google-chrome"),
+            shutil.which("chromium-browser"),
+            shutil.which("chromium"),
             "/usr/bin/google-chrome-stable",
             "/usr/bin/google-chrome",
-            "/usr/bin/chromium",
             "/usr/bin/chromium-browser",
-        ]:
-            if os.path.exists(path):
-                return path
+            "/usr/bin/chromium",
+            "/data/data/com.termux/files/usr/bin/chromium",  # Termux
+        ]
 
-        # 2️⃣ ищем установленный Playwright Chromium
-        pw_cache = os.path.expanduser("~/.cache/ms-playwright/")
-        matches = glob.glob(os.path.join(pw_cache, "chromium-*", "chrome-linux", "chrome"))
-        if matches:
-            return matches[0]
+    for path in candidates:
+        if path and os.path.exists(path):
+            return path
 
-        # 3️⃣ если не нашли — пытаемся установить
-        try:
-            print("⚙️ Устанавливаю Playwright Chromium...")
-            subprocess.run(["playwright", "install", "chromium"], check=True)
-            matches = glob.glob(os.path.join(pw_cache, "chromium-*", "chrome-linux", "chrome"))
-            if matches:
-                return matches[0]
-        except Exception:
-            pass
+    print("⚠️ [detect_chromium_path] Chrome/Chromium не найден, Playwright сам выберет встроенный.")
+    return None
 
-        # 4️⃣ fallback — None (Playwright сам выберет)
-        return None
 
+# ✅ Глобальный путь (используй эту переменную везде)
 BROWSER_PATH = detect_chromium_path()
+print(f"[browser_patches] Используется браузер: {BROWSER_PATH}")
 
 
 PROFILE_DIR = Path("data/chrome_profiles")

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 from tqdm.asyncio import tqdm_asyncio
 from playwright.async_api import async_playwright
+from services.browser_patches import BROWSER_PATH
 
 # === Настройка тишины для asyncio и Playwright ===
 def silence_asyncio_exceptions(loop, context):
@@ -90,13 +91,6 @@ DELAY_BETWEEN_LOTTERY = 1.5    #Промежуток между запросам
 HEADLESS = True
 # Путь к реальному Chrome (если хочешь использовать настоящий Chrome).
 # Если оставишь None — Playwright будет использовать свою сборку Chromium.
-# Путь к реальному Chrome (Windows)
-import platform
-
-if platform.system() == "Windows":
-    BROWSER_PATH = r".venv\Chrome\Application\chrome.exe"
-else:
-    BROWSER_PATH = "/usr/bin/google-chrome-stable"
 # пример Windows: r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 # Базовая папка для persistent профилей (user_data_dir)
 PROFILE_BASE_DIR = Path("data/chrome_profiles")
