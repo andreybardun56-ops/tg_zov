@@ -3,8 +3,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import logging
 
-from services.farm_puzzles_auto import run_farm_puzzles_for_all
-from services.event_checker import check_all_events
+from services.event_manager import run_full_event_cycle
 from services.logger import logger
 from config import ADMIN_IDS
 
@@ -44,42 +43,12 @@ async def _loop(bot=None):
 
         logger.info("[SCHED] 🧩 Запуск ежедневных задач...")
 
-        # === 🧩 Проверка активных акций ===
         try:
-            admin_id = ADMIN_IDS[0] if ADMIN_IDS else None
-            if admin_id:
-                results = await check_all_events(admin_id)
-                summary = "📊 <b>Обновление статуса акций:</b>\n\n"
-                for name, active in results.items():
-                    emoji = "✅" if active else "⚠️"
-                    summary += f"{emoji} {name}\n"
-
-                if bot:
-                    try:
-                        await bot.send_message(admin_id, summary, parse_mode="HTML")
-                    except Exception as e:
-                        logger.warning(f"[SCHED] Не удалось отправить отчёт админу: {e}")
-
-                logger.info("[SCHED] ✅ Проверка акций завершена")
-            else:
-                logger.warning("[SCHED] Нет ADMIN_IDS, пропускаю проверку акций.")
+            logger.info("[SCHED] 🚀 Полный цикл событий…")
+            await run_full_event_cycle(bot=bot)
+            logger.info("[SCHED] ✅ Цикл событий завершён")
         except Exception as e:
-            logger.exception(f"[SCHED] Ошибка при проверке акций: {e}")
-
-        # === 🚀 Автоматический фарм пазлов ===
-        try:
-            logger.info("[SCHED] 🚀 Запуск farm_puzzles_for_all...")
-            await run_farm_puzzles_for_all(bot)
-            logger.info("[SCHED] ✅ Ежедневный фарм завершён")
-        except Exception as e:
-            logger.exception(f"[SCHED] Ошибка при запуске фарма: {e}")
-        # === 🚀 Автоматический фарм пазлов ===
-        try:
-            logger.info("[SCHED] 🚀 Запуск farm_puzzles_for_all...")
-            await run_farm_puzzles_for_all(bot)
-            logger.info("[SCHED] ✅ Ежедневный фарм завершён")
-        except Exception as e:
-            logger.exception(f"[SCHED] Ошибка при запуске фарма: {e}")
+            logger.exception(f"[SCHED] Ошибка во время цикла событий: {e}")
 
 async def ensure_scheduler_started(bot=None):
     """Гарантирует, что планировщик запущен только один раз."""
