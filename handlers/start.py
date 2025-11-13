@@ -15,7 +15,7 @@ from config import ADMIN_IDS
 from services.login_and_refresh import process_all_files
 from services.lucky_wheel_auto import run_lucky_wheel
 from services.puzzle_claim_auto import claim_puzzle
-from services.puzzle_claim import issue_puzzle_codes
+from services.puzzle_claim import issue_puzzle_codes, issue_specific_puzzle
 from services.dragon_quest import run_dragon_quest
 from services.accounts_manager import load_all_users
 from services.farm_puzzles_auto import (
@@ -30,7 +30,8 @@ from keyboards.inline import (
     get_puzzle_accounts_kb,
     get_puzzle_numbers_kb,
     get_exchange_accounts_kb,
-    get_contact_dev_kb
+    get_contact_dev_kb,
+    get_collect_puzzle_kb
 )
 from keyboards.inline import send_exchange_items
 from services.event_checker import check_all_events
@@ -88,6 +89,7 @@ def get_admin_puzzles_menu() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="━━━━━━━━━━━ 🧩 Пазлы ━━━━━━━━━━━")],
             [
                 KeyboardButton(text="🧩 Получить пазлы"),
+                KeyboardButton(text="🧩 Взять пазл"),
                 KeyboardButton(text=farm_button_text)
             ],
             [KeyboardButton(text="🔙 Назад к событиям")]
@@ -172,6 +174,59 @@ async def open_manage_menu(message: types.Message):
 @router.message(F.text == "🔧 Система")
 async def open_system_menu(message: types.Message):
     await message.answer("🔧 Системное меню:", reply_markup=admin_system_menu)
+
+
+@router.message(F.text.in_({"🧩 Взять пазл", "🧩 Собрать пазл"}))
+async def open_collect_puzzle_menu(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("🚫 У тебя нет доступа к этой функции.")
+        return
+    await message.answer(
+        "🧩 Выбери номер пазла 1–9:",
+        reply_markup=get_collect_puzzle_kb()
+    )
+
+
+@router.callback_query(F.data == "collect_puzzle")
+async def handle_collect_puzzle_back(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("🚫 Нет доступа.", show_alert=True)
+        return
+    await callback.answer()
+    text = "🧩 Выбери номер пазла 1–9:"
+    try:
+        await callback.message.edit_text(text, reply_markup=get_collect_puzzle_kb())
+    except Exception:
+        await callback.message.answer(text, reply_markup=get_collect_puzzle_kb())
+
+
+@router.callback_query(F.data.startswith("collect_puzzle:"))
+async def handle_collect_specific_puzzle(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("🚫 Нет доступа.", show_alert=True)
+        return
+
+    await callback.answer()
+    try:
+        _, puzzle_str = callback.data.split(":", 1)
+        puzzle_id = int(puzzle_str)
+    except (ValueError, IndexError):
+        await callback.message.answer("⚠️ Некорректный номер пазла.")
+        return
+
+    if puzzle_id < 1 or puzzle_id > 9:
+        await callback.message.answer("⚠️ Номер пазла должен быть от 1 до 9.")
+        return
+
+    code = await issue_specific_puzzle(callback.from_user.id, puzzle_id)
+    if code:
+        await callback.message.answer(
+            f"🧩 Пазл {puzzle_id} найден!\nТвой код: <code>{code}</code>",
+            parse_mode="HTML"
+        )
+    else:
+        await callback.message.answer(f"❌ Пазлов типа {puzzle_id} больше нет.")
+
 
 # ------------------------------------ 🚀 /start ------------------------------------
 @router.message(Command("start"))

@@ -84,6 +84,23 @@ def get_puzzle_numbers_kb(uid: str) -> InlineKeyboardMarkup:
     kb.adjust(3)
     return kb.as_markup()
 
+
+def get_collect_puzzle_kb() -> InlineKeyboardMarkup:
+    """Сетка выбора конкретного пазла для выдачи админам."""
+    rows = []
+    digits = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"]
+    for i in range(0, 9, 3):
+        rows.append([
+            InlineKeyboardButton(text=digits[i + j], callback_data=f"collect_puzzle:{i + j + 1}")
+            for j in range(3)
+        ])
+
+    rows.append([
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="collect_puzzle")
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
 # ============================ ♻️ ОБМЕН ПАЗЛОВ (выбор аккаунта) ============================
 
 def get_exchange_accounts_kb(accounts: list) -> InlineKeyboardMarkup:
