@@ -77,15 +77,32 @@ def _append_specific_log(user_id: int, puzzle_id: int, ec_param: str):
         )
 
 
+def _parse_log_tokens(line: str) -> Dict[str, str]:
+    """Извлекает пары ключ=значение из строки лога."""
+    tokens: Dict[str, str] = {}
+    for chunk in line.strip().split():
+        if "=" not in chunk:
+            continue
+        key, value = chunk.split("=", 1)
+        tokens[key.strip()] = value.strip()
+    return tokens
+
+
 def _has_claim_record(user_id: int, ec_param: str) -> bool:
+    """Проверяет, получал ли уже пользователь конкретный ec_param."""
     if not PUZZLE_CLAIM_LOG.exists():
         return False
-    pattern_user = f"user_id={user_id}"
-    pattern_code = f"ec_param={ec_param}"
+
     try:
         with open(PUZZLE_CLAIM_LOG, "r", encoding="utf-8") as f:
             for line in f:
-                if pattern_user in line and pattern_code in line:
+                if "ec_param=" not in line:
+                    continue
+                tokens = _parse_log_tokens(line)
+                if (
+                    tokens.get("user_id") == str(user_id)
+                    and tokens.get("ec_param") == ec_param
+                ):
                     return True
     except Exception as e:
         logger.warning(f"[PUZZLE_CLAIM] Ошибка чтения puzzle_claim.log: {e}")
