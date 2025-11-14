@@ -6,6 +6,8 @@ import shutil
 from pathlib import Path
 from typing import List, Optional
 from html import escape
+from pathlib import Path
+import shutil
 from services.logger import logger
 from aiogram import Router, types, F
 from aiogram.filters import Command
@@ -94,7 +96,10 @@ admin_events_menu = ReplyKeyboardMarkup(
             KeyboardButton(text="🃏 Найди пару"),
             KeyboardButton(text="⚙️ Создающая машина")
         ],
-        [KeyboardButton(text="🐉 Рыцари Драконы")],
+        [
+            KeyboardButton(text="🐉 Рыцари Драконы"),
+            KeyboardButton(text="🧩 Маленькая помощь")
+        ],
         [KeyboardButton(text="━━━━━━━━━━━ 🧩 Пазлы ━━━━━━━━━━━")],
         [KeyboardButton(text="🧩 Пазлы (подменю)")],
         [KeyboardButton(text="🔙 Главное меню")]
@@ -154,6 +159,7 @@ admin_system_menu = ReplyKeyboardMarkup(
             KeyboardButton(text="🧪 Тест"),
             KeyboardButton(text="📊 Статистика")
         ],
+        [KeyboardButton(text="🧹 Очистить мусор")],
         [KeyboardButton(text="♻️ Перезапустить бота")],
         [KeyboardButton(text="🔙 Главное меню")]
     ],
@@ -572,6 +578,7 @@ async def refresh_cookies_in_database(message: types.Message):
                     f"📊 Обработано: <b>{combined_done}</b> из <b>{combined_total}</b>",
                     parse_mode="HTML",
                 )
+                await status_msg.edit_text(text, parse_mode="HTML")
             except Exception:
                 pass
         except Exception as e:
