@@ -138,7 +138,7 @@ def get_admin_manage_menu() -> ReplyKeyboardMarkup:
                 KeyboardButton(text="🔍 Проверить пары")
             ],
             [
-                KeyboardButton(text="📊 Проверить акции"),  # 🔥 новая кнопка
+                KeyboardButton(text="📊 Проверить акции"),
                 KeyboardButton(text="🔁 Автосбор наград")
             ],
             [
@@ -267,7 +267,7 @@ async def start_cmd(message: types.Message):
     """Приветственное сообщение и выбор панели"""
     user_id = message.from_user.id
     is_admin = user_id in ADMIN_IDS
-    kb = admin_main_menu if is_admin else user_main_kb  # ✅ заменено admin_main_kb → admin_main_menu
+    kb = admin_main_menu if is_admin else user_main_kb
 
     text = (
         "👋 Привет! Я твой помощник по акциям Castle Clash.\n\n"
@@ -298,7 +298,6 @@ async def add_account_from_mvp(message: types.Message):
     info = await extract_player_info_from_page(url)
     if not info.get("success"):
         err = info.get("error", "Неизвестная ошибка")
-        # ВАЖНО: ошибка может содержать HTML-теги — экранируем!
         safe = escape(str(err))
         await message.answer(f"❌ Не удалось получить данные: <code>{safe}</code>", parse_mode="HTML")
         return
@@ -310,25 +309,21 @@ async def add_account_from_mvp(message: types.Message):
         await message.answer("⚠️ Не удалось получить IGG ID. Проверь ссылку.")
         return
 
-    # Проверяем на дубликаты
     all_data = load_all_users()
     for other_user, acc_list in all_data.items():
         if any(acc.get("uid") == uid for acc in acc_list):
             await message.answer("⚠️ Этот IGG ID уже добавлен другим пользователем.")
             return
 
-    # Загружаем аккаунты пользователя
     accounts = load_accounts(user_id)
     if any(acc.get("uid") == uid for acc in accounts):
         await message.answer(f"⚠️ Аккаунт <code>{uid}</code> уже есть.", parse_mode="HTML")
         return
 
-    # ✅ Добавляем аккаунт
     new_acc = {"uid": uid, "username": username, "mvp_url": url}
     accounts.append(new_acc)
     save_accounts(user_id, accounts)
 
-    # ♻️ Обновляем cookies
     await message.answer(f"♻️ Обновляю cookies для <b>{username}</b>...", parse_mode="HTML")
     result = await refresh_cookies_mvp(user_id, uid)
 
@@ -346,7 +341,6 @@ async def add_account_from_mvp(message: types.Message):
 
     await message.answer(msg, parse_mode="HTML")
 
-    # 🚀 Автоматически запускаем проверку акций
     await message.answer("🎯 Запускаю автоматическую проверку акций...")
     asyncio.create_task(run_full_event_cycle(bot=message.bot, manual=True))
 # 🗑 Удалить аккаунт (через inline кнопки)
@@ -487,7 +481,6 @@ async def check_events_cmd(message: types.Message):
 
     # 🔥 запускаем проверку в фоне
     asyncio.create_task(background_check())
-
 # ------------------------------------ 🧩 ОБНОВИТЬ COOKIES В БАЗЕ ------------------------------------
 @router.message(F.text == "🧩 Обновить cookies в базе")
 async def refresh_cookies_in_database(message: types.Message):
