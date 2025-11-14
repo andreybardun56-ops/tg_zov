@@ -2,6 +2,9 @@
 import json
 import os
 import asyncio
+import shutil
+from pathlib import Path
+from typing import List, Optional
 from html import escape
 from services.logger import logger
 from aiogram import Router, types, F
@@ -12,7 +15,8 @@ from aiogram.types import (
     CallbackQuery
 )
 from config import ADMIN_IDS
-from services.login_and_refresh import process_all_files
+import services.login_and_refresh as lr1
+import services.login_and_refresh_2 as lr2
 from services.lucky_wheel_auto import run_lucky_wheel
 from services.puzzle_claim_auto import claim_puzzle
 from services.puzzle_claim import issue_puzzle_codes, issue_specific_puzzle
@@ -35,8 +39,25 @@ from keyboards.inline import (
 )
 from keyboards.inline import send_exchange_items
 from services.event_checker import check_all_events
+from services.puzzle_exchange_auto import get_fragment_count, exchange_item
 router = Router()
 USER_ACCOUNTS_FILE = "data/user_accounts.json"
+PARALLEL_REFRESH_PROCESSES = 2
+COOKIE_REFRESH_TASKS: List[asyncio.Task] = []
+COOKIE_REFRESH_STATUS_MESSAGE: Optional[types.Message] = None
+
+for path in (
+    Path("data/chrome_profiles"),
+    Path("data/chrome_profiles_2"),
+    Path("data/data_akk"),
+    Path("data/logs"),
+    Path("logs"),
+):
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def is_cookie_refresh_running() -> bool:
+    return any(task for task in COOKIE_REFRESH_TASKS if not task.done())
 # ----------------------------- 👥 Главное меню -----------------------------
 user_main_kb = ReplyKeyboardMarkup(
     keyboard=[
@@ -98,26 +119,32 @@ def get_admin_puzzles_menu() -> ReplyKeyboardMarkup:
     )
 
 # ⚙️ Управление
-admin_manage_menu = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="━━━━━━━━━━━ ⚙️ Управление ━━━━━━━━━━━")],
-        [
-            KeyboardButton(text="👤 Управление аккаунтами"),
-            KeyboardButton(text="🔍 Проверить пары")
+def get_admin_manage_menu() -> ReplyKeyboardMarkup:
+    cookie_button_text = (
+        "⛔️ Остановить обновление cookies"
+        if is_cookie_refresh_running()
+        else "🧩 Обновить cookies в базе"
+    )
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="━━━━━━━━━━━ ⚙️ Управление ━━━━━━━━━━━")],
+            [
+                KeyboardButton(text="👤 Управление аккаунтами"),
+                KeyboardButton(text="🔍 Проверить пары")
+            ],
+            [
+                KeyboardButton(text="📊 Проверить акции"),  # 🔥 новая кнопка
+                KeyboardButton(text="🔁 Автосбор наград")
+            ],
+            [
+                KeyboardButton(text="🔄 Обновить cookies"),
+                KeyboardButton(text=cookie_button_text)
+            ],
+            [KeyboardButton(text="🎁 Ввод промокода")],
+            [KeyboardButton(text="🔙 Главное меню")]
         ],
-        [
-            KeyboardButton(text="📊 Проверить акции"),  # 🔥 новая кнопка
-            KeyboardButton(text="🔁 Автосбор наград")
-        ],
-        [
-            KeyboardButton(text="🔄 Обновить cookies"),
-            KeyboardButton(text="🧩 Обновить cookies в базе")
-        ],
-        [KeyboardButton(text="🎁 Ввод промокода")],
-        [KeyboardButton(text="🔙 Главное меню")]
-    ],
-    resize_keyboard=True
-)
+        resize_keyboard=True
+    )
 
 # 🔧 Система
 admin_system_menu = ReplyKeyboardMarkup(
@@ -169,7 +196,7 @@ async def back_to_events(message: types.Message):
 
 @router.message(F.text == "⚙️ Управление")
 async def open_manage_menu(message: types.Message):
-    await message.answer("⚙️ Меню управления:", reply_markup=admin_manage_menu)
+    await message.answer("⚙️ Меню управления:", reply_markup=get_admin_manage_menu())
 
 @router.message(F.text == "🔧 Система")
 async def open_system_menu(message: types.Message):
@@ -399,6 +426,39 @@ async def restart_bot(message: types.Message):
     except Exception as e:
         await message.answer(f"❌ Не удалось выполнить restart: <code>{e}</code>", parse_mode="HTML")
 
+
+@router.message(F.text == "🧹 Очистить мусор")
+async def cleanup_trash(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("🚫 У тебя нет доступа.")
+        return
+
+    paths = [
+        Path("data/chrome_profiles"),
+        Path("data/chrome_profiles_2"),
+        Path("data/logs"),
+        Path("data/fails"),
+        Path("data/failures"),
+    ]
+
+    deleted = []
+    for path in paths:
+        try:
+            if path.exists():
+                shutil.rmtree(path, ignore_errors=True)
+                deleted.append(f"✔ Очищено: {path}")
+        except Exception as e:
+            deleted.append(f"⚠ Ошибка при очистке {path}: {e}")
+
+    for path in paths:
+        path.mkdir(parents=True, exist_ok=True)
+
+    details = "\n".join(deleted) if deleted else "Нечего очищать."
+    await message.answer(
+        "🧹 <b>Очистка завершена!</b>\n\n" + details,
+        parse_mode="HTML",
+    )
+
 @router.message(F.text == "📊 Проверить акции")
 async def check_events_cmd(message: types.Message):
     """Запускает проверку всех акций в фоне, не блокируя бота."""
@@ -425,39 +485,144 @@ async def check_events_cmd(message: types.Message):
 # ------------------------------------ 🧩 ОБНОВИТЬ COOKIES В БАЗЕ ------------------------------------
 @router.message(F.text == "🧩 Обновить cookies в базе")
 async def refresh_cookies_in_database(message: types.Message):
-    """Фоновое обновление cookies всех аккаунтов через login_and_refresh с уведомлениями."""
+    """Фоновое обновление cookies всех аккаунтов через два независимых процесса."""
     user_id = message.from_user.id
     if user_id not in ADMIN_IDS:
         await message.answer("🚫 У тебя нет доступа к этой функции.")
         return
 
-    status_msg = await message.answer("🧩 Начинаю обновление cookies... ⏳")
+    if is_cookie_refresh_running():
+        await message.answer(
+            "⚠️ Обновление уже выполняется. Используй кнопку ⛔️, чтобы остановить текущий процесс.",
+            reply_markup=get_admin_manage_menu(),
+        )
+        return
 
-    async def progress_update(percent: float, done: int, total: int):
-        """Обновляет сообщение каждые 10%."""
-        if int(percent * 100) % 5 == 0:  # каждые 5 %
+    status_msg = await message.answer(
+        "🧩 Начинаю обновление cookies... ⏳",
+        reply_markup=get_admin_manage_menu(),
+    )
+    global COOKIE_REFRESH_STATUS_MESSAGE
+    COOKIE_REFRESH_STATUS_MESSAGE = status_msg
+
+    progress_state = {
+        idx + 1: {"done": 0, "total": 0}
+        for idx in range(PARALLEL_REFRESH_PROCESSES)
+    }
+    progress_lock = asyncio.Lock()
+    last_reported_percent = 0.0
+
+    async def update_status(percent: float, done: int, total: int):
+        try:
+            await status_msg.edit_text(
+                "🧩 Обновление cookies...\n\n"
+                f"📊 Прогресс: <b>{percent*100:.1f}%</b>\n"
+                f"✅ Обработано: <b>{done}</b> из <b>{total}</b>",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
+    async def handle_progress(worker_id: int, percent: float, done: int, total: int):
+        nonlocal last_reported_percent
+        async with progress_lock:
+            state = progress_state.setdefault(worker_id, {"done": 0, "total": 0})
+            state["done"] = done
+            state["total"] = total
+
+            combined_total = sum(item["total"] for item in progress_state.values())
+            if combined_total == 0:
+                return
+
+            combined_done = sum(item["done"] for item in progress_state.values())
+            combined_percent = combined_done / combined_total if combined_total else 0.0
+            if combined_done < combined_total and (combined_percent - last_reported_percent) < 0.05:
+                return
+            last_reported_percent = combined_percent
+
+        await update_status(combined_percent, combined_done, combined_total)
+
+    async def cb1(worker_id: int, percent: float, done: int, total: int):
+        await handle_progress(worker_id, percent, done, total)
+
+    async def cb2(worker_id: int, percent: float, done: int, total: int):
+        await handle_progress(worker_id, percent, done, total)
+
+    async def run_update():
+        nonlocal status_msg
+        global COOKIE_REFRESH_TASKS, COOKIE_REFRESH_STATUS_MESSAGE
+        try:
+            lr1.clear_stop_request()
+            lr2.clear_stop_request()
+
+            task1 = asyncio.create_task(lr1.process_all_files(progress_callback=cb1))
+            task2 = asyncio.create_task(lr2.process_all_files(progress_callback=cb2))
+            COOKIE_REFRESH_TASKS = [task1, task2]
+
+            results = await asyncio.gather(*COOKIE_REFRESH_TASKS, return_exceptions=True)
+            for result in results:
+                if isinstance(result, Exception):
+                    raise result
+
+            combined_total = sum(item["total"] for item in progress_state.values())
+            combined_done = sum(item["done"] for item in progress_state.values())
             try:
                 await status_msg.edit_text(
-                    f"🧩 Обновление cookies...\n\n"
-                    f"📊 Прогресс: <b>{percent*100:.1f}%</b>\n"
-                    f"✅ Обработано: <b>{done}</b> из <b>{total}</b>",
+                    "✔ Обновление cookies завершено!\n\n"
+                    f"📊 Обработано: <b>{combined_done}</b> из <b>{combined_total}</b>",
                     parse_mode="HTML",
                 )
             except Exception:
-                pass  # если Telegram ограничил частоту обновлений
-
-    async def run_update():
-        try:
-            await process_all_files(progress_callback=progress_update)
-            await status_msg.edit_text(
-                "✅ Обновление cookies завершено!\n"
-                "📁 Логи: <code>logs/login_refresh.log</code>",
-                parse_mode="HTML"
-            )
+                pass
         except Exception as e:
-            await status_msg.edit_text(f"❌ Ошибка при обновлении: <code>{e}</code>", parse_mode="HTML")
+            safe_err = escape(str(e))
+            try:
+                await status_msg.edit_text(
+                    f"❌ Ошибка при обновлении: <code>{safe_err}</code>",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+        finally:
+            COOKIE_REFRESH_TASKS.clear()
+            lr1.clear_stop_request()
+            lr2.clear_stop_request()
+            COOKIE_REFRESH_STATUS_MESSAGE = None
 
     asyncio.create_task(run_update())
+
+# ------------------------------------ ⛔️ ОСТАНОВКА ОБНОВЛЕНИЯ COOKIES ------------------------------------
+@router.message(F.text == "⛔️ Остановить обновление cookies")
+async def stop_cookie_refresh(message: types.Message):
+    user_id = message.from_user.id
+    if user_id not in ADMIN_IDS:
+        await message.answer("🚫 У тебя нет доступа к этой функции.")
+        return
+
+    if not is_cookie_refresh_running():
+        await message.answer(
+            "⚠️ Сейчас нет активного процесса обновления.",
+            reply_markup=get_admin_manage_menu(),
+        )
+        return
+
+    lr1.request_stop()
+    lr2.request_stop()
+
+    status_msg = COOKIE_REFRESH_STATUS_MESSAGE
+    if status_msg:
+        try:
+            await status_msg.edit_text(
+                "⛔️ Останавливаю обновление cookies... Дождись завершения текущих аккаунтов.",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
+    await message.answer(
+        "⛔️ Останавливаю обновление cookies... Дождись завершения текущих аккаунтов.",
+        reply_markup=get_admin_manage_menu(),
+    )
 
 # ------------------------------------ 🧩 Фарм пазлов ------------------------------------
 @router.message(F.text == "🧩 Фарм пазлов")
@@ -610,12 +775,6 @@ async def handle_puzzle_claim(callback: CallbackQuery):
     asyncio.create_task(run_claim())
 
 # ------------------------------------ ♻️ ОБМЕН ПАЗЛОВ ------------------------------------
-from aiogram.types import CallbackQuery
-import logging
-from services.puzzle_exchange_auto import get_fragment_count, exchange_item
-
-logger = logging.getLogger("exchange")
-
 @router.callback_query(F.data.startswith("exchange_acc:"))
 async def start_exchange(callback: CallbackQuery):
     """Начало обмена — проверяем количество фрагментов и показываем предметы"""

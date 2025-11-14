@@ -16,14 +16,14 @@ init(autoreset=True)
 
 # === Настройки ===
 DATA_DIR = Path("data/data_akk")
-PROFILE_DIR = Path("data/chrome_profiles")
+PROFILE_DIR = Path("data/chrome_profiles_2")
 LOGS_DIR = Path("logs")
 
 for path in (DATA_DIR, PROFILE_DIR, LOGS_DIR):
     path.mkdir(parents=True, exist_ok=True)
 
-LOG_FILE = LOGS_DIR / "login_refresh.log"
-WORKER_ID = 1
+LOG_FILE = LOGS_DIR / "login_refresh_2.log"
+WORKER_ID = 2
 
 CONCURRENT = 5 #Сколько аккаунтов обрабатывается одновременно
 DELAY_AFTER_SUCCESS = 1 #Задержка (в секундах) после успешного логина
@@ -32,7 +32,7 @@ WAIT_AFTER_LOGIN = 5 #Время ожидания после нажатия кн
 SLOW_MO = 0.5 #Искусственная задержка Playwright между действиями
 
 # === Логирование ===
-logger = logging.getLogger("login_refresh")
+logger = logging.getLogger("login_refresh_2")
 logger.setLevel(logging.INFO)
 for h in logger.handlers[:]:
     logger.removeHandler(h)
@@ -50,7 +50,7 @@ _stop_requested = False
 def request_stop():
     global _stop_requested
     _stop_requested = True
-    logger.info("[STOP] Получен сигнал остановки для login_and_refresh")
+    logger.info("[STOP] Получен сигнал остановки для login_and_refresh_2")
 
 def clear_stop_request():
     global _stop_requested
@@ -396,10 +396,10 @@ async def process_all_files(
         return 0
 
     midpoint = (len(all_files) + 1) // 2
-    files = all_files[:midpoint]
+    files = all_files[midpoint:]
 
     if not files:
-        logger.info("[WORKER %s] Нет файлов для обработки в первой половине списка.", WORKER_ID)
+        logger.info("[WORKER %s] Нет файлов для обработки во второй половине списка.", WORKER_ID)
         return 0
 
     total_accounts = 0
