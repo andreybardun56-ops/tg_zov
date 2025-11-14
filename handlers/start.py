@@ -6,6 +6,8 @@ import shutil
 from pathlib import Path
 from typing import List, Optional
 from html import escape
+from pathlib import Path
+import shutil
 from services.logger import logger
 from aiogram import Router, types, F
 from aiogram.filters import Command
@@ -539,8 +541,11 @@ async def refresh_cookies_in_database(message: types.Message):
 
         await update_status(combined_percent, combined_done, combined_total)
 
-    cb1 = lambda percent, done, total: handle_progress(1, percent, done, total)
-    cb2 = lambda percent, done, total: handle_progress(2, percent, done, total)
+    async def cb1(worker_id: int, percent: float, done: int, total: int):
+        await handle_progress(worker_id, percent, done, total)
+
+    async def cb2(worker_id: int, percent: float, done: int, total: int):
+        await handle_progress(worker_id, percent, done, total)
 
     async def run_update():
         nonlocal status_msg
@@ -566,6 +571,7 @@ async def refresh_cookies_in_database(message: types.Message):
                     f"📊 Обработано: <b>{combined_done}</b> из <b>{combined_total}</b>",
                     parse_mode="HTML",
                 )
+                await status_msg.edit_text(text, parse_mode="HTML")
             except Exception:
                 pass
         except Exception as e:
