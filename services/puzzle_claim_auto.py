@@ -140,23 +140,19 @@ async def claim_puzzle(tg_user_id: str, target_iggid: str, puzzle_num: int, bot,
         )
         return
 
-    donor_data = find_donor_for_puzzle(puzzle_num)
+    used_donors = set(user_entry["donors"])
+    donor_data = find_donor_for_puzzle_exclude(puzzle_num, used_donors)
     if not donor_data:
-        await bot.send_message(tg_user_id, f"⚠️ Нет доступных дубликатов пазла {puzzle_num}.")
+        await bot.send_message(
+            tg_user_id,
+            f"⚠️ Нет доступных доноров для пазла {puzzle_num}. Попробуй другой номер.",
+        )
         return
 
     donor, donor_index = donor_data
     donor_iggid = donor.get("iggid")
     if not donor_iggid:
         await bot.send_message(tg_user_id, "⚠️ Ошибка: у донора нет IGGID.")
-        return
-
-    if donor_iggid in user_entry["donors"]:
-        await bot.send_message(
-            tg_user_id,
-            f"⚠️ Ты уже получал пазл от <code>{donor_iggid}</code> в этом событии.",
-            parse_mode="HTML"
-        )
         return
 
     cookies_db = load_cookies_file()
