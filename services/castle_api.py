@@ -26,30 +26,58 @@ def _accept_language(profile: Dict[str, Any]) -> str:
     return profile.get("accept_language") or "en-US,en;q=0.9"
 
 
+def _sec_ch_headers(profile: Dict[str, Any]) -> Dict[str, str]:
+    headers: Dict[str, str] = {}
+    if profile.get("sec_ch_ua"):
+        headers["Sec-Ch-Ua"] = profile["sec_ch_ua"]
+    if profile.get("sec_ch_ua_mobile"):
+        headers["Sec-Ch-Ua-Mobile"] = profile["sec_ch_ua_mobile"]
+    if profile.get("sec_ch_ua_platform"):
+        headers["Sec-Ch-Ua-Platform"] = profile["sec_ch_ua_platform"]
+    return headers
+
+
 def build_navigation_headers(profile: Dict[str, Any], referer: Optional[str] = None) -> Dict[str, str]:
     headers = {
         "User-Agent": profile.get("user_agent", "Mozilla/5.0"),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": _accept_language(profile),
+        "Accept-Encoding": "gzip, deflate, br",
         "Cache-Control": "max-age=0",
         "Pragma": "no-cache",
         "Upgrade-Insecure-Requests": "1",
+        "Connection": "keep-alive",
+        "Host": MVP_ORIGIN.host,
+        "Sec-Fetch-Site": "same-origin" if referer else "none",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-User": "?1",
+        "Sec-Fetch-Dest": "document",
     }
+    headers.update(_sec_ch_headers(profile))
     if referer:
         headers["Referer"] = referer
     return headers
 
 
 def build_ajax_headers(profile: Dict[str, Any], referer: str) -> Dict[str, str]:
-    return {
+    headers = {
         "User-Agent": profile.get("user_agent", "Mozilla/5.0"),
         "Accept": "application/json, text/javascript, */*; q=0.01",
         "Accept-Language": _accept_language(profile),
+        "Accept-Encoding": "gzip, deflate, br",
         "Referer": referer,
+        "Origin": str(MVP_ORIGIN),
         "X-Requested-With": "XMLHttpRequest",
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
+        "Connection": "keep-alive",
+        "Host": MVP_ORIGIN.host,
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Dest": "empty",
     }
+    headers.update(_sec_ch_headers(profile))
+    return headers
 
 
 async def human_delay(min_delay: float = 0.4, max_delay: float = 1.2) -> None:
