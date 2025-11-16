@@ -5,6 +5,7 @@ import asyncio
 import logging
 import tempfile
 import shutil
+from html import escape
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple, List
 
@@ -406,7 +407,8 @@ async def claim_puzzle(tg_user_id: str, target_iggid: str, puzzle_num: int, bot,
                 elif last_error == 5:
                     err_text = f"🚫 Для аккаунта <code>{target_iggid}</code> достигнут лимит 30 пазлов."
                 else:
-                    err_text = f"❌ Не удалось получить пазл {puzzle_num}.\n<code>{text[:300]}</code>"
+                    safe_text = escape(text[:300]) if text else ""
+                    err_text = f"❌ Не удалось получить пазл {puzzle_num}.\n<code>{safe_text}</code>"
                 if msg:
                     try:
                         await msg.edit_text(err_text, parse_mode="HTML")
