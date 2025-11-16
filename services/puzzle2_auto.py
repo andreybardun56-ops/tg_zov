@@ -1,111 +1,41 @@
 # services/puzzle2_auto.py
 import os
 import asyncio
-import warnings
 import logging
 import json
 import tempfile
 import shutil
 import time
 import random
-import inspect
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+
+import aiohttp
+from aiohttp import ClientError
+from yarl import URL
 from tqdm.asyncio import tqdm_asyncio
-from playwright.async_api import async_playwright
-from services.browser_patches import BROWSER_PATH
 
-# === Настройка тишины для asyncio и Playwright ===
-def silence_asyncio_exceptions(loop, context):
-    msg = context.get("message")
-    exc = context.get("exception")
-    if isinstance(exc, asyncio.CancelledError):
-        return  # игнорируем
-    if exc and "Target page, context or browser has been closed" in str(exc):
-        return  # игнорируем ошибки закрытия браузера
-    if msg and "Future exception was never retrieved" in msg:
-        return  # игнорируем «Future not retrieved»
-    loop.default_exception_handler(context)
+from services.browser_patches import get_random_browser_profile
 
-try:
-    loop = asyncio.get_running_loop()
-except RuntimeError:
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-loop.set_exception_handler(silence_asyncio_exceptions)
+# === Глобальные параметры ===
+EVENT_PAGE = "https://event-eu-cc.igg.com/event/puzzle2/"
+EVENT_API = f"{EVENT_PAGE}ajax.req.php"
+EVENT_URL = URL("https://event-eu-cc.igg.com/")
+REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=45)
 
-# Глобальный флаг остановки для аккуратного завершения фарма
-STOP_EVENT = asyncio.Event()
-
-
-def request_stop() -> None:
-    """Помечает, что нужно остановить текущую обработку аккаунтов."""
-    STOP_EVENT.set()
-
-
-def is_stop_requested() -> bool:
-    """Возвращает True, если поступил сигнал на остановку."""
-    return STOP_EVENT.is_set()
-
-
-def clear_stop_request() -> None:
-    """Сбрасывает флаг остановки (используется при новом запуске)."""
-    STOP_EVENT.clear()
-
-# 🔇 Подавляем лишние предупреждения из Playwright и asyncio
-warnings.filterwarnings("ignore", category=RuntimeWarning)
-logging.getLogger("asyncio").setLevel(logging.ERROR)
-logging.getLogger("playwright").setLevel(logging.WARNING)
-base = "https://event-eu-cc.igg.com/event/puzzle2/ajax.req.php"
-# === Импорт stealth ===
-try:
-    from playwright_stealth import stealth_async
-except Exception:
-    try:
-        from playwright_stealth import stealth
-        stealth_async = stealth
-    except Exception:
-        stealth_async = None
-
-from datetime import datetime
-from pathlib import Path
-from typing import Any, Dict, List
-from tqdm.asyncio import tqdm_asyncio
-from playwright.async_api import async_playwright
-
-# === Папки и файлы ===
 DATA_DIR = Path("data/data_akk")
 LOG_DIR = Path("data/logs")
-SCREEN_DIR = Path("data/screenshots")
 DATA_FILE = Path("data/puzzle_data.jsonl")
 FAIL_DIR = Path("data/failures")
 
-# === Настройки ===
-CONCURRENT = 5  # количество аккаов
-REQUEST_TIMEOUT = 40000  #время ожидания загрузки
-COOKIE_CAPTURE_WAIT = 3     #Ждёт пока установятся куки
-DELAY_BETWEEN_ACCOUNTS = 3   #Пауза (в секундах) между стартом обработки одного аккаунта и переходом к следующему.
-DELAY_BETWEEN_LOTTERY = 1.5    #Промежуток между запросами lottery
+CONCURRENT = 5
+DELAY_BETWEEN_ACCOUNTS = 3
+DELAY_BETWEEN_LOTTERY = 1.5
 
-HEADLESS = True
-# Путь к реальному Chrome (если хочешь использовать настоящий Chrome).
-# Если оставишь None — Playwright будет использовать свою сборку Chromium.
-# пример Windows: r"C:\Program Files\Google\Chrome\Application\chrome.exe"
-# Базовая папка для persistent профилей (user_data_dir)
-PROFILE_BASE_DIR = Path("data/chrome_profiles")
-PROFILE_BASE_DIR.mkdir(parents=True, exist_ok=True)
-# 🛠 Попытка автоматически исправить права на папку (Windows)
-try:
-    import subprocess
-    subprocess.run([
-        "icacls", str(PROFILE_BASE_DIR),
-        "/grant", f"{os.getlogin()}:(OI)(CI)F", "/T"
-    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-except Exception:
-    pass
-# Небольшая задержка между действиями (имитация человека)
-SLOW_MO = 50  # мс
+STOP_EVENT = asyncio.Event()
+
+
 # === Логирование ===
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 FAIL_DIR.mkdir(parents=True, exist_ok=True)
@@ -116,85 +46,36 @@ file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(messa
 logger.handlers.clear()
 logger.addHandler(file_handler)
 
-# ---------------- helpers ----------------
-def get_random_browser_profile():
-    UAS = [
-        # desktop
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit(537.36) (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit(537.36) (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Safari/605.1.15",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit(537.36) (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-        # mobile
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 16_1_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.1 Mobile/15E148 Safari/604.1",
-        "Mozilla/5.0 (Linux; Android 10; SM-A205U) AppleWebKit(537.36) (KHTML, like Gecko) Chrome/89.0.4389.105 Mobile Safari/537.36",
-        "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit(537.36) (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36",
-    ]
 
-    viewports = [
-        {"width": 360, "height": 640},  # смартфоны
-        {"width": 375, "height": 667},
-        {"width": 390, "height": 844},
-        {"width": 412, "height": 915},
-        {"width": 768, "height": 1024},  # планшеты
-        {"width": 800, "height": 600},
-        {"width": 1024, "height": 768},
-    ]
-
-    locales = ["en-US", "en-GB", "ru-RU", "de-DE", "fr-FR"]
-    timezones = [
-        "Europe/Moscow", "Europe/Prague", "America/New_York",
-        "Asia/Shanghai", "Asia/Tokyo", "Europe/London"
-    ]
-    accept_languages = [
-        "en-US,en;q=0.9",
-        "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-        "de-DE,de;q=0.9,en;q=0.8",
-        "fr-FR,fr;q=0.9,en;q=0.8"
-    ]
-
-    ua = random.choice(UAS)
-    vp = random.choice(viewports)
-    locale = random.choice(locales)
-    timezone = random.choice(timezones)
-    accept_language = random.choice(accept_languages)
-
-    is_mobile = ("Mobile" in ua) or ("iPhone" in ua) or ("Android" in ua)
-
-    device_scale_factor = random.choice([1, 1, 1.5, 2])  # чаще 1
-    hardware_concurrency = random.choice([2, 4, 6, 8])
-
-    return {
-        "user_agent": ua,
-        "viewport": vp,
-        "locale": locale,
-        "timezone": timezone,
-        "accept_language": accept_language,
-        "is_mobile": is_mobile,
-        "device_scale_factor": device_scale_factor,
-        "hardware_concurrency": hardware_concurrency,
-    }
+# === Управление остановкой ===
+def request_stop() -> None:
+    STOP_EVENT.set()
 
 
-async def humanize_pre_action(page):
-    """Небольшая имитация человека перед важными действиями."""
-    try:
-        await page.mouse.move(100 + random.randint(-20, 20), 100 + random.randint(-15, 15), steps=random.randint(6, 12))
-        await asyncio.sleep(0.15 + random.random() * 0.35)
-        await page.mouse.move(200 + random.randint(-30, 30), 140 + random.randint(-20, 20), steps=random.randint(5, 9))
-        await asyncio.sleep(0.05 + random.random() * 0.2)
-        # лёгкий скролл как будто проглядели страницу
-        await page.mouse.wheel(0, random.randint(100, 300))
-        await asyncio.sleep(0.1 + random.random() * 0.25)
-    except Exception:
-        pass
+def is_stop_requested() -> bool:
+    return STOP_EVENT.is_set()
+
+
+def clear_stop_request() -> None:
+    STOP_EVENT.clear()
+
+
+# === Вспомогательные функции ===
+def jitter(base: float, variance: float = 0.5) -> float:
+    delta = random.uniform(-variance * base, variance * base)
+    return max(0.1, base + delta)
+
+
+async def humanize_pre_action(min_delay: float = 0.5, max_delay: float = 2.0) -> None:
+    await asyncio.sleep(random.uniform(min_delay, max_delay))
 
 
 def load_accounts() -> List[Dict[str, Any]]:
-    """Считать все new_data*.json и вернуть список аккаунтов с uid+cookies+mail"""
-    out = []
+    accounts: List[Dict[str, Any]] = []
     if not DATA_DIR.exists():
         logger.error("Папка не найдена: %s", DATA_DIR)
-        return out
+        return accounts
+
     for f in sorted(DATA_DIR.glob("new_data*.json")):
         try:
             with open(f, "r", encoding="utf-8") as fh:
@@ -204,23 +85,17 @@ def load_accounts() -> List[Dict[str, Any]]:
                     mail = entry.get("mail")
                     for k, v in entry.items():
                         if k.isdigit() and isinstance(v, dict):
-                            out.append({"file": f.name, "mail": mail, "uid": k, "cookies": v})
+                            accounts.append({"file": f.name, "mail": mail, "uid": k, "cookies": v})
         except Exception as e:
             logger.warning("Не удалось прочитать %s: %s", f.name, e)
-    return out
+    return accounts
 
 
-def cookies_to_playwright(cookies: Dict[str, str], domain: str = ".event-eu-cc.igg.com") -> List[Dict[str, Any]]:
-    """Преобразует {name: value} в формат Playwright cookie"""
-    return [{"name": str(k), "value": str(v), "domain": domain, "path": "/"} for k, v in cookies.items()]
-
-
-def save_puzzle_data(entry: dict, file_path: Path):
-    """Сохраняет или обновляет данные аккаунта в многострочном JSON-формате"""
+def save_puzzle_data(entry: dict, file_path: Path) -> None:
     file_path.parent.mkdir(parents=True, exist_ok=True)
     entry["time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    existing = []
+    existing: List[Dict[str, Any]] = []
     updated = False
 
     if file_path.exists():
@@ -255,23 +130,14 @@ def save_puzzle_data(entry: dict, file_path: Path):
         existing.append(entry)
 
     temp_fd, temp_path = tempfile.mkstemp(dir=file_path.parent)
-    with open(temp_fd, "w", encoding="utf-8") as tmp:
+    with os.fdopen(temp_fd, "w", encoding="utf-8") as tmp:
         for obj in existing:
             json.dump(obj, tmp, ensure_ascii=False, indent=2)
             tmp.write("\n\n")
     shutil.move(temp_path, file_path)
 
-def jitter(base: float, variance: float = 0.5):
-    """
-    Возвращает случайную задержку: base ± (0..variance*base)
-    Пример: jitter(3, 0.5) -> число в ~[1.5, 4.5]
-    """
-    # можно использовать random.uniform для равномерного разброса
-    delta = random.uniform(-variance * base, variance * base)
-    return max(0.1, base + delta)
 
 def calculate_puzzle_totals(file_path: Path):
-    """Считает общее количество каждого пазла (1–9) по всем аккаунтам (только дубликаты)."""
     totals = {str(i): 0 for i in range(1, 10)}
     count_accounts = 0
 
@@ -310,10 +176,10 @@ def calculate_puzzle_totals(file_path: Path):
     total_sum = sum(totals.values())
     logger.info("=== 🧩 Итоги по пазлам (только дубликаты) ===")
     for pid, cnt in totals.items():
-        logger.info(f"Пазл {pid}: {cnt} шт.")
+        logger.info("Пазл %s: %s шт.", pid, cnt)
     logger.info("=========================")
-    logger.info(f"Всего дубликатов: {total_sum}")
-    logger.info(f"Аккаунтов обработано: {count_accounts}")
+    logger.info("Всего дубликатов: %s", total_sum)
+    logger.info("Аккаунтов обработано: %s", count_accounts)
 
     summary_path = Path("data/puzzle_summary.json")
     with open(summary_path, "w", encoding="utf-8") as out:
@@ -321,371 +187,202 @@ def calculate_puzzle_totals(file_path: Path):
             "totals": totals,
             "accounts": count_accounts,
             "all_duplicates": total_sum,
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }, out, ensure_ascii=False, indent=2)
 
     return totals
 
-# ---------------- per-account workflow ----------------
-async def process_account(account: Dict[str, Any], p) -> None:
+
+# === Работа с cookies ===
+def init_cookie_jar(cookies: Optional[Dict[str, str]]) -> aiohttp.CookieJar:
+    jar = aiohttp.CookieJar(unsafe=True)
+    if cookies:
+        jar.update_cookies(cookies, response_url=EVENT_URL)
+    return jar
+
+
+def cookies_from_jar(jar: aiohttp.CookieJar) -> Dict[str, str]:
+    filtered = jar.filter_cookies(EVENT_URL)
+    return {k: v.value for k, v in filtered.items()}
+
+
+def persist_account_cookies(uid: str, cookies: Dict[str, str]) -> None:
+    if not cookies:
+        return
+    for file_path in sorted(DATA_DIR.glob("new_data*.json")):
+        try:
+            with open(file_path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception:
+            continue
+
+        changed = False
+        if isinstance(data, list):
+            for entry in data:
+                for k in list(entry.keys()):
+                    if k == str(uid) and isinstance(entry[k], dict):
+                        entry[k] = cookies
+                        changed = True
+        if changed:
+            tmp = file_path.with_suffix(".tmp")
+            with open(tmp, "w", encoding="utf-8") as out:
+                json.dump(data, out, ensure_ascii=False, indent=2)
+            os.replace(tmp, file_path)
+            logger.info("[%s] 🍪 Cookies обновлены в %s", uid, file_path.name)
+
+
+def log_cookie_names(jar: aiohttp.CookieJar, uid: str, caption: str) -> None:
+    cookies = jar.filter_cookies(EVENT_URL)
+    if cookies:
+        names = ", ".join(cookies.keys())
+        logger.info("[%s] 🍪 Cookies %s: %s", uid, caption, names)
+    else:
+        logger.warning("[%s] ⚠️ Cookies %s отсутствуют", uid, caption)
+
+
+# === HTTP-заголовки ===
+def _get_accept_language(profile: Dict[str, Any]) -> str:
+    return profile.get("accept_language") or "en-US,en;q=0.9"
+
+
+def build_navigation_headers(profile: Dict[str, Any]) -> Dict[str, str]:
+    accept_lang = _get_accept_language(profile)
+    return {
+        "User-Agent": profile.get("user_agent", "Mozilla/5.0"),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": accept_lang,
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Upgrade-Insecure-Requests": "1",
+        "Referer": EVENT_PAGE,
+    }
+
+
+def build_ajax_headers(profile: Dict[str, Any]) -> Dict[str, str]:
+    accept_lang = _get_accept_language(profile)
+    return {
+        "User-Agent": profile.get("user_agent", "Mozilla/5.0"),
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Accept-Language": accept_lang,
+        "Referer": EVENT_PAGE,
+        "X-Requested-With": "XMLHttpRequest",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
+
+
+# === HTTP-помощники ===
+async def warmup_event_page(session: aiohttp.ClientSession, profile: Dict[str, Any], uid: str) -> None:
+    headers = build_navigation_headers(profile)
+    try:
+        async with session.get(EVENT_PAGE, headers=headers) as resp:
+            await resp.text()
+            logger.info("[%s] 🌐 Прогрев puzzle2: %s", uid, resp.status)
+    except ClientError as e:
+        logger.warning("[%s] ⚠️ Ошибка прогрева puzzle2: %s", uid, e)
+
+
+async def perform_lottery_request(session: aiohttp.ClientSession, profile: Dict[str, Any], uid: str, label: str) -> str:
+    params = {"action": "lottery"}
+    headers = build_ajax_headers(profile)
+    async with session.get(EVENT_API, params=params, headers=headers) as resp:
+        text = await resp.text()
+        logger.info("[%s] 🎯 Ответ lottery (%s): %s | %s", uid, label, resp.status, text[:200].replace("\n", " "))
+        return text
+
+
+async def run_lottery_sequence(session: aiohttp.ClientSession, profile: Dict[str, Any], uid: str) -> None:
+    try:
+        await asyncio.sleep(jitter(DELAY_BETWEEN_LOTTERY, variance=0.5))
+        text = await perform_lottery_request(session, profile, uid, "основной")
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            logger.warning("[%s] ⚠️ lottery: не JSON", uid)
+            return
+
+        err = data.get("error")
+        status = data.get("status")
+        if str(err) == "1" and str(status) == "0":
+            logger.info("[%s] 🚫 Шансы закончились", uid)
+            return
+        if str(status) == "1":
+            logger.info("[%s] ✅ Лотерея успешна — выполняем ещё 2 запроса", uid)
+            for attempt in range(2):
+                await asyncio.sleep(jitter(DELAY_BETWEEN_LOTTERY, variance=0.5))
+                await perform_lottery_request(session, profile, uid, f"доп.{attempt + 1}")
+        else:
+            logger.info("[%s] ⚠️ Неизвестный ответ lottery: %s", uid, text[:150])
+    except ClientError as e:
+        logger.warning("[%s] ⚠️ Ошибка lottery: %s", uid, e)
+
+
+async def fetch_get_resource(session: aiohttp.ClientSession, profile: Dict[str, Any], uid: str) -> Optional[str]:
+    headers = build_ajax_headers(profile)
+    params = {"action": "get_resource"}
+    try:
+        async with session.post(EVENT_API, params=params, headers=headers) as resp:
+            text = await resp.text()
+            logger.info("[%s] 📥 Ответ get_resource: %s", uid, resp.status)
+            return text
+    except ClientError as e:
+        logger.error("[%s] ❌ Ошибка get_resource: %s", uid, e)
+        return None
+
+
+# === Основной workflow аккаунта ===
+async def process_account(account: Dict[str, Any]) -> bool:
     uid = account.get("uid")
     mail = account.get("mail", "?")
     cookies = account.get("cookies", {})
-    context = page = None
     start_time = time.perf_counter()
 
-    try:
-        logger.info("[%s] → старт обработки (mail=%s)", uid, mail)
+    profile = get_random_browser_profile()
+    jar = init_cookie_jar(cookies)
 
-        # 1 / 3 / 4 — профиль + параметры при создании контекста
-        profile = get_random_browser_profile()
-        ua = profile["user_agent"]
-        vp = profile["viewport"]
-        locale = profile["locale"]
+    logger.info("[%s] → старт обработки (mail=%s)", uid, mail)
 
-        PROFILE_BASE_DIR.mkdir(parents=True, exist_ok=True)
-        user_data_dir = str(PROFILE_BASE_DIR / f"{uid}")
-
-        # === скрытый фоновый режим (headless masked) ===
-        window_args = [
-            "--headless=new",  # фон без окна
-            "--disable-gpu",
-            "--mute-audio",
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-blink-features=AutomationControlled",
-            "--disable-infobars",
-            "--hide-scrollbars",
-            "--window-size=1920,1080",
-            "--blink-settings=imagesEnabled=true",
-            "--disable-extensions",
-            "--disable-translate",
-            "--disable-background-timer-throttling",
-            "--disable-backgrounding-occluded-windows",
-            "--disable-renderer-backgrounding",
-        ]
-
-        launch_kwargs = dict(
-            headless=True,  # полностью фоновый режим
-            slow_mo=SLOW_MO,
-            viewport=vp,
-            user_agent=ua,
-            locale=locale,
-            timezone_id=profile["timezone"],
-            is_mobile=profile["is_mobile"],
-            device_scale_factor=profile["device_scale_factor"],
-            java_script_enabled=True,
-            args=window_args,
-        )
-
-        if BROWSER_PATH:
-            launch_kwargs["executable_path"] = BROWSER_PATH
-
-        logger.info("[%s] 🕶 Запуск браузера в фоновом режиме (headless masked)", uid)
-        context = await p.chromium.launch_persistent_context(user_data_dir, **launch_kwargs)
-
-        # === Маскировка headless через JS ===
+    connector = aiohttp.TCPConnector(limit=0)
+    async with aiohttp.ClientSession(cookie_jar=jar, timeout=REQUEST_TIMEOUT, connector=connector) as session:
         try:
-            patch_script = """
-                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                window.chrome = { runtime: {} };
-                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
-                Object.defineProperty(navigator, 'languages', { get: () => ['ru-RU', 'ru', 'en-US'] });
-                Object.defineProperty(Notification, 'permission', { get: () => 'default' });
-                Object.defineProperty(navigator, 'pdfViewerEnabled', { get: () => true });
-                const getParameter = WebGLRenderingContext.prototype.getParameter;
-                WebGLRenderingContext.prototype.getParameter = function(param) {
-                    if (param === 37445) return 'NVIDIA GeForce RTX 3080';
-                    if (param === 37446) return 'Google Inc. (NVIDIA)';
-                    return getParameter(param);
-                };
-            """
-            # Имитация navigator.connection и deviceMemory (Akamai check)
-            connection_patch = """
-            Object.defineProperty(navigator, 'connection', {
-              value: { rtt: 50, downlink: 10, effectiveType: '4g', saveData: false },
-              configurable: true
-            });
-            Object.defineProperty(navigator, 'deviceMemory', { value: 8 });
-            """
-            await context.add_init_script(connection_patch)
+            await warmup_event_page(session, profile, uid)
+            await asyncio.sleep(jitter(2.5, variance=0.4))
+            await humanize_pre_action()
 
-            await context.add_init_script(patch_script)
-            # Дополнительная маскировка под реальный браузер
-            extra_mask_patch = """
-            try {
-              // маскируем доступ к permissions
-              if (navigator.permissions && navigator.permissions.query) {
-                const orig = navigator.permissions.query;
-                navigator.permissions.query = (param) => (
-                  param && param.name === 'notifications'
-                    ? Promise.resolve({ state: Notification.permission })
-                    : orig(param)
-                );
-              }
-              // маскируем аппаратную информацию
-              Object.defineProperty(navigator, 'hardwareConcurrency', { value: 8 });
-              Object.defineProperty(navigator, 'maxTouchPoints', { value: 1 });
-            } catch (e) {}
-            """
-            await context.add_init_script(extra_mask_patch)
+            updated_cookies = cookies_from_jar(session.cookie_jar)
+            persist_account_cookies(uid, updated_cookies)
+            log_cookie_names(session.cookie_jar, uid, "после warmup")
 
-            logger.info("[%s] 🧩 Headless patch активирован", uid)
-        except Exception as e:
-            logger.warning("[%s] ⚠️ Ошибка headless patch: %s", uid, e)
+            await run_lottery_sequence(session, profile, uid)
 
-        # 4 — Accept-Language через заголовки
-        try:
-            await context.set_extra_http_headers({"Accept-Language": profile["accept_language"]})
-        except Exception:
-            pass
+            await humanize_pre_action(1.0, 2.5)
+            log_cookie_names(session.cookie_jar, uid, "перед get_resource")
 
-        page = await context.new_page()
+            await asyncio.sleep(jitter(1.5, variance=1.0))
+            text = await fetch_get_resource(session, profile, uid)
+            if not text:
+                return False
 
-        # Если есть cookies из файла аккаунтов — добавим (это НЕ пункт 10: мы не грузим внешние экспорты)
-        try:
-            if cookies:
-                await context.add_cookies(cookies_to_playwright(cookies))
-        except Exception as e:
-            logger.warning("[%s] Не удалось добавить cookies: %s", uid, e)
-
-        # 6 — Аккуратный init_script (webdriver/languages/plugins/hardwareConcurrency/permissions)
-        try:
-            lang_list = ["en-US", "en"]
-            if locale.startswith("ru"):
-                lang_list = ["ru-RU", "ru", "en-US", "en"]
-            elif locale.startswith("de"):
-                lang_list = ["de-DE", "de", "en-US", "en"]
-            elif locale.startswith("fr"):
-                lang_list = ["fr-FR", "fr", "en-US", "en"]
-
-            init_script = f"""
-            (() => {{
-                try {{
-                    Object.defineProperty(navigator, 'webdriver', {{ get: () => undefined, configurable: true }});
-                    Object.defineProperty(navigator, 'languages', {{ get: () => {json.dumps(lang_list)}, configurable: true }});
-                    Object.defineProperty(navigator, 'hardwareConcurrency', {{ get: () => {profile['hardware_concurrency']}, configurable: true }});
-                    // простая имитация plugins/mimeTypes — без переусердствования
-                    const pluginArray = [1,2,3];
-                    Object.defineProperty(navigator, 'plugins', {{ get: () => pluginArray, configurable: true }});
-                    Object.defineProperty(navigator, 'mimeTypes', {{ get: () => pluginArray, configurable: true }});
-                    // permissions patch (частый чек)
-                    if (navigator.permissions && navigator.permissions.query) {{
-                        const orig = navigator.permissions.query.bind(navigator.permissions);
-                        navigator.permissions.query = (params) => {{
-                            if (params && params.name === 'notifications') {{
-                                return Promise.resolve({{ state: Notification.permission }});
-                            }}
-                            return orig(params);
-                        }};
-                    }}
-                }} catch (e) {{}}
-            }})();
-            """
-            await context.add_init_script(init_script)
-        except Exception as e:
-            logger.warning("[%s] add_init_script error: %s", uid, e)
-
-        # 7 — stealth: пробуем async и sync
-        if stealth_async is not None:
-            try:
-                # если stealth_async — асинхронная функция (defined with `async def`)
-                if inspect.iscoroutinefunction(stealth_async):
-                    await stealth_async(page)
-                else:
-                    # вызывает функцию (sync) — возможно она вернёт awaitable (корутину)
-                    result = stealth_async(page)
-                    # если результат awaitable — await'им его
-                    if inspect.isawaitable(result):
-                        await result
-            except Exception as e:
-                logger.warning("[%s] stealth failed: %s", uid if 'uid' in locals() else "?", e)
-
-        # 8 — лёгкая имитация человека
-        await humanize_pre_action(page)
-
-        # Переход на страницу и cookie banner
-        await page.goto("https://event-eu-cc.igg.com/event/puzzle2/", wait_until="networkidle", timeout=REQUEST_TIMEOUT)
-        # --- 🔄 Обновляем cookies после захода на страницу (только для текущего uid) ---
-        await asyncio.sleep(jitter(2.5, variance=0.4))
-        try:
-            fresh_cookies = await context.cookies()
-            # преобразуем в {name: value}
-            cookie_dict = {c.get("name"): c.get("value") for c in fresh_cookies if "name" in c and "value" in c}
-
-            if cookie_dict:
-                # проходим по всем файлам new_data*.json и обновляем только нужный аккаунт
-                for file_path in sorted(DATA_DIR.glob("new_data*.json")):
-                    try:
-                        with open(file_path, "r", encoding="utf-8") as fh:
-                            data = json.load(fh)
-                    except Exception:
-                        # не получилось прочитать — пропускаем файл
-                        continue
-
-                    changed = False
-                    # data — ожидается список аккаунтов
-                    if isinstance(data, list):
-                        for entry in data:
-                            # entry — словарь вида {"mail": "...", "1100209271": {...}, ...}
-                            # ищем ключ равный uid (как строка)
-                            if str(uid) in entry and isinstance(entry.get(str(uid)), dict):
-                                # заменяем cookies только для этого uid на {name: value}
-                                entry[str(uid)] = cookie_dict
-                                changed = True
-                                break
-
-                    if changed:
-                        # безопасно перезаписываем файл (atomic)
-                        tmp_fd, tmp_path = tempfile.mkstemp(dir=file_path.parent)
-                        try:
-                            with os.fdopen(tmp_fd, "w", encoding="utf-8") as tmpf:
-                                json.dump(data, tmpf, ensure_ascii=False, indent=2)
-                            shutil.move(tmp_path, file_path)
-                            logger.info("[%s] 🔄 Cookies обновлены и сохранены в %s", uid, file_path.name)
-                        except Exception as e:
-                            # попытка убрать временный файл, если что-то пошло не так
-                            try:
-                                os.remove(tmp_path)
-                            except Exception:
-                                pass
-                            logger.warning("[%s] ⚠️ Не удалось записать обновлённые cookies в %s: %s", uid,
-                                           file_path.name, e)
-                        # нашли и обновили нужный файл — больше не ищем
-                        break
-        except Exception as e:
-            logger.warning("[%s] ⚠️ Не удалось обновить cookies: %s", uid, e)
-
-        await asyncio.sleep(COOKIE_CAPTURE_WAIT)
-
-        try:
-            btn = page.locator("#onetrust-accept-btn-handler")
-            if await btn.count() > 0:
-                await asyncio.sleep(0.2 + random.random() * 0.3)
-                await btn.click(timeout=2000)
-        except Exception:
-            pass
-        # 🧩 Первый запрос lottery — проверяем, есть ли шансы
-        try:
-            await asyncio.sleep(jitter(DELAY_BETWEEN_LOTTERY, variance=0.5))
-            js = f"""
-                async () => {{
-                    const res = await fetch('{base}?action=lottery', {{
-                        method: 'GET',
-                        credentials: 'include',
-                        headers: {{
-                            'X-Requested-With': 'XMLHttpRequest',
-                            'Referer': 'https://event-eu-cc.igg.com/event/puzzle2/'
-                        }}
-                    }});
-                    const txt = await res.text();
-                    return {{status: res.status, text: txt}};
-                }}
-            """
-            resp = await page.evaluate(js)
-            text = resp.get("text", "")
-            status = resp.get("status", 0)
-            logger.info(f"[{uid}] 🎯 Ответ lottery: {status} | {text[:200]}")
-
-            # Разбираем JSON-ответ
-            try:
-                data = json.loads(text)
-                err = data.get("error")
-                st = data.get("status")
-                # Если сервер вернул ошибку 1 — шансы закончились
-                if (err == 1 or err == "1") and st == 0:
-                    logger.info(f"[{uid}] 🚫 Шансы закончились — пропускаем дополнительные lottery.")
-                # Если ответ успешный — делаем ещё 2 запроса
-                elif st == 1:
-                    logger.info(f"[{uid}] ✅ Лотерея успешна — выполняем ещё 2 запроса.")
-                    for j in range(2):
-                        await asyncio.sleep(jitter(DELAY_BETWEEN_LOTTERY, variance=0.5))
-                        await page.evaluate(f"""
-                            async () => {{
-                                await fetch('{base}?action=lottery', {{
-                                    method: 'GET',
-                                    credentials: 'include'
-                                }});
-                            }}
-                        """)
-                        logger.info(f"[{uid}] 🔁 lottery дополнительный {j + 1}/2 выполнен")
-                else:
-                    logger.info(f"[{uid}] ⚠️ Неизвестный ответ lottery: {text[:150]}")
-            except Exception:
-                logger.warning(f"[{uid}] ⚠️ Не удалось распарсить ответ lottery, продолжаем.")
-        except Exception as e:
-            logger.warning(f"[{uid}] ⚠️ Ошибка при первом lottery: {e}")
-
-        # 👀 Имитируем активность пользователя перед запросом
-        await humanize_pre_action(page)
-        await asyncio.sleep(1.5 + random.random() * 2.0)
-
-        # 🧩 Проверяем куки перед запросом get_resource
-        try:
-            cookies_before = await context.cookies("https://event-eu-cc.igg.com/")
-            if cookies_before:
-                cookie_names = [c.get("name") for c in cookies_before]
-                logger.info("[%s] 🍪 Найдены cookies перед get_resource: %s", uid, ", ".join(cookie_names))
-            else:
-                logger.warning("[%s] ⚠️ Куки перед get_resource отсутствуют!", uid)
-        except Exception as e:
-            logger.warning("[%s] ⚠️ Не удалось получить cookies: %s", uid, e)
-
-        # === get_resource ===
-        await asyncio.sleep(jitter(1.5, variance=1.0))  # пауза 0.5–3 сек
-        try:
-            # 👀 Имитируем активность пользователя
-            await humanize_pre_action(page)
-            await asyncio.sleep(1.0 + random.random() * 2.0)
-
-            # 🔄 Основной запрос через JS в контексте страницы
-            js_code = f"""
-                async () => {{
-                    const res = await fetch('{base}?action=get_resource', {{
-                        method: 'POST',
-                        credentials: 'include',
-                        headers: {{
-                            'X-Requested-With': 'XMLHttpRequest',
-                            'Accept': 'application/json, text/javascript, */*; q=0.01',
-                            'Referer': 'https://event-eu-cc.igg.com/event/puzzle2/'
-                        }}
-                    }});
-                    return await res.text();
-                }}
-            """
-            text = await page.evaluate(js_code)
-
-            # 💾 сохраняем ответ для отладки
-            # raw_path = FAIL_DIR / f"{uid}_get_resource_raw.txt"
-            # raw_path.write_text(text, encoding="utf-8")
-            # logger.info("[%s] 💾 Ответ get_resource сохранён в %s", uid, raw_path)
-
-            # Проверяем — JSON ли это
             if not text.strip().startswith("{"):
                 debug_path = FAIL_DIR / f"{uid}_get_resource_response.html"
                 debug_path.write_text(text, encoding="utf-8")
-                logger.error("[%s] ⚠️ get_resource: сервер вернул HTML, сохранено в %s", uid, debug_path)
-                return
+                logger.error("[%s] ⚠️ get_resource вернул HTML, сохранено в %s", uid, debug_path)
+                return False
 
-            # ✅ Парсим JSON
             data = json.loads(text)
             logger.info("[%s] ✅ get_resource получен успешно", uid)
 
-            # Извлекаем нужные данные (с защитой от неожиданных структур)
             data_section = data.get("data", {})
-
-            if isinstance(data_section, list) and len(data_section) > 0:
+            if isinstance(data_section, list) and data_section:
                 user = data_section[0].get("user", {})
             elif isinstance(data_section, dict):
                 user = data_section.get("user", {})
             else:
                 user = {}
 
-            # 🔍 Логируем весь extra_info для отладки
             extra_info = user.get("extra_info", {})
             logger.info("[%s] 🧩 EXTRA_INFO: %s", uid, json.dumps(extra_info, ensure_ascii=False))
 
-            # 🧠 Исправляем тип, если пазлы пришли строкой
             puzzle_data = extra_info.get("puzzle", {})
             if isinstance(puzzle_data, str):
                 try:
@@ -699,46 +396,45 @@ async def process_account(account: Dict[str, Any], p) -> None:
                 "iggid": user.get("iggid"),
                 "ec_param": user.get("ec_param"),
                 "puzzle": puzzle_data,
-                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             }
 
-            # Только дубликаты (минус 1 оригинал)
-            duplicates = {}
+            duplicates: Dict[str, int] = {}
             for pid, count in puzzle_data.items():
                 try:
-                    count = int(count)
-                    if count >= 2:
-                        duplicates[pid] = count - 1
+                    count_int = int(count)
                 except Exception:
                     continue
+                if count_int >= 2:
+                    duplicates[pid] = count_int - 1
 
             if duplicates:
                 entry["puzzle"] = duplicates
                 save_puzzle_data(entry, DATA_FILE)
                 logger.info("[%s] ✅ Найдены дубликаты пазлов: %s — сохранено", uid, duplicates)
-                # 🎨 Красивый вывод пазлов 3×3
+
                 try:
                     import colorama
                     from colorama import Fore, Style
-                    colorama.init()
 
+                    colorama.init()
                     grid = [[" " for _ in range(3)] for _ in range(3)]
                     for pid, count in puzzle_data.items():
-                        idx = int(pid) - 1
+                        try:
+                            idx = int(pid) - 1
+                        except Exception:
+                            continue
                         row, col = divmod(idx, 3)
-                        if count >= 2:
-                            # выделяем дубликаты зелёным
+                        if int(count) >= 2:
                             grid[row][col] = f"{Fore.GREEN}{count}{Style.RESET_ALL}"
                         else:
                             grid[row][col] = str(count)
-
                     logger.info("[%s] 🧩 Расклад пазлов:", uid)
-                    for r in grid:
-                        logger.info("[%s]    %s", uid, "  ".join(r))
+                    for row in grid:
+                        logger.info("[%s]    %s", uid, "  ".join(row))
                 except Exception as e:
                     logger.warning("[%s] ⚠️ Ошибка визуализации пазлов: %s", uid, e)
 
-                # 💾 Сразу обновляем общий подсчёт пазлов
                 try:
                     calculate_puzzle_totals(DATA_FILE)
                     logger.info("[%s] 🔄 Итоговый файл puzzle_summary.json обновлён", uid)
@@ -747,87 +443,73 @@ async def process_account(account: Dict[str, Any], p) -> None:
             else:
                 logger.info("[%s] ❌ Дубликатов нет — пропуск", uid)
 
+            return True
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
-            # 9 — сохраняем артефакты и при общей ошибке
-            try:
-                if page:
-                    await page.screenshot(path=str(FAIL_DIR / f"{uid}_exception.png"))
-                    html = await page.content()
-                    (FAIL_DIR / f"{uid}_exception.html").write_text(html, encoding="utf-8")
-            except Exception:
-                pass
+            debug_path = FAIL_DIR / f"{uid}_exception.txt"
+            debug_path.write_text(str(e), encoding="utf-8")
             logger.error("[%s] ❌ Общая ошибка: %s", uid, e)
-    finally:
-        duration = round(time.perf_counter() - start_time, 2)
-        logger.info("[%s] ⏱ Завершено за %s сек.", uid, duration)
-        try:
-            if page:
-                await page.close()
-            if context:
-                await context.close()
-        except Exception:
-            pass
-        # 🧹 Автоудаление профиля браузера после завершения аккаунта
-        try:
-            user_data_dir_path = Path(PROFILE_BASE_DIR / f"{uid}")
-            if user_data_dir_path.exists():
-                shutil.rmtree(user_data_dir_path, ignore_errors=True)
-                logger.info("[%s] 🧹 Папка профиля удалена: %s", uid, user_data_dir_path)
-        except Exception as e:
-            logger.warning("[%s] ⚠️ Не удалось удалить профиль: %s", uid, e)
-        await asyncio.sleep(jitter(DELAY_BETWEEN_ACCOUNTS, variance=0.6))
-# ---------------- main ----------------
+            return False
+        finally:
+            duration = round(time.perf_counter() - start_time, 2)
+            logger.info("[%s] ⏱ Завершено за %s сек.", uid, duration)
+            await asyncio.sleep(jitter(DELAY_BETWEEN_ACCOUNTS, variance=0.6))
+
+
+# === Основной сценарий ===
 async def main():
     clear_stop_request()
     accounts = load_accounts()
     if not accounts:
         logger.error("Аккаунты не найдены в %s", DATA_DIR)
         return
+
     start_time = time.perf_counter()
     stats = {"total": len(accounts), "success": 0, "fail": 0}
     logger.info("Всего аккаунтов: %d", len(accounts))
     sem = asyncio.Semaphore(CONCURRENT)
 
-    async with async_playwright() as p:
-
-        async def worker(acc):
-            uid = acc.get("uid")
+    async def worker(acc: Dict[str, Any]):
+        uid = acc.get("uid")
+        if STOP_EVENT.is_set():
+            logger.info("[%s] ⏹ Пропуск аккаунта: получен сигнал остановки", uid)
+            return
+        async with sem:
             if STOP_EVENT.is_set():
-                logger.info("[%s] ⏹ Пропуск аккаунта: получен сигнал остановки", uid)
+                logger.info("[%s] ⏹ Завершаем перед стартом обработки", uid)
                 return
-            async with sem:
-                if STOP_EVENT.is_set():
-                    logger.info("[%s] ⏹ Завершаем перед стартом обработки", uid)
-                    return
-                try:
-                    await process_account(acc, p)
+            try:
+                success = await process_account(acc)
+                if success:
                     stats["success"] += 1
-                except Exception as e:
+                else:
                     stats["fail"] += 1
-                    logger.error(f"[{acc.get('uid')}] ❌ Ошибка: {e}")
+            except Exception as e:
+                stats["fail"] += 1
+                logger.error("[%s] ❌ Ошибка выполнения: %s", uid, e)
 
-        tasks = [asyncio.create_task(worker(acc)) for acc in accounts]
-        try:
-            await tqdm_asyncio.gather(*tasks, desc="Обработка аккаунтов", total=len(tasks))
-        except asyncio.CancelledError:
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            raise
+    tasks = [asyncio.create_task(worker(acc)) for acc in accounts]
+    try:
+        await tqdm_asyncio.gather(*tasks, desc="Обработка аккаунтов", total=len(tasks))
+    except asyncio.CancelledError:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
 
-    # ✅ После обработки всех аккаунтов — пересчитываем общие итоги пазлов
     try:
         calculate_puzzle_totals(DATA_FILE)
         logger.info("🧮 Итоговый подсчёт пазлов выполнен успешно")
     except Exception as e:
         logger.warning("⚠️ Не удалось пересчитать итоговые пазлы: %s", e)
 
-    total_time = round(time.perf_counter() - start_time, 2)
     logger.info("=== ✅ Итог ===")
-    logger.info(f"Всего аккаунтов: {stats['total']}")
-    logger.info(f"Успешно: {stats['success']}")
-    logger.info(f"Ошибок: {stats['fail']}")
-    logger.info(f"Время выполнения: {total_time} сек.")
+    logger.info("Всего аккаунтов: %s", stats["total"])
+    logger.info("Успешно: %s", stats["success"])
+    logger.info("Ошибок: %s", stats["fail"])
+    total_time = round(time.perf_counter() - start_time, 2)
+    logger.info("Время выполнения: %s сек.", total_time)
     logger.info("Все аккаунты обработаны.")
 
 
