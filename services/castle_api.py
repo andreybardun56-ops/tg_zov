@@ -5,7 +5,7 @@ import json
 import os
 import random
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
 
 import aiohttp
 from aiohttp import ClientError
@@ -182,6 +182,80 @@ async def refresh_cookies_mvp(user_id: str, uid: str) -> dict[str, Any]:
     except Exception as e:
         logger.exception(f"[COOKIES] ❌ Ошибка при обновлении cookies: {e}")
         return {"success": False, "error": str(e)}
+
+
+ProgressPayload = Dict[str, Any]
+ProgressCallback = Callable[[ProgressPayload], Awaitable[None]]
+
+
+async def refresh_all_cookies(
+    progress_callback: Optional[ProgressCallback] = None,
+    sleep_between: tuple[float, float] = (0.8, 1.6),
+) -> Dict[str, Any]:
+    """Обновляет cookies всех аккаунтов, используя aiohttp MVP-подход."""
+
+    from .accounts_manager import get_all_users_accounts
+
+    accounts_by_user = get_all_users_accounts()
+    total_accounts = sum(len(accs) for accs in accounts_by_user.values())
+
+    summary: Dict[str, Any] = {
+        "total": total_accounts,
+        "processed": 0,
+        "success": 0,
+        "failed": 0,
+        "skipped": [],
+        "failures": [],
+    }
+
+    async def emit(payload: ProgressPayload) -> None:
+        if progress_callback:
+            try:
+                await progress_callback(payload)
+            except Exception:
+                logger.exception("[COOKIES] Ошибка в progress_callback")
+
+    for user_id, accounts in accounts_by_user.items():
+        for account in accounts:
+            summary["processed"] += 1
+            uid = (account.get("uid") or "").strip()
+            username = account.get("username") or "Игрок"
+            mvp_url = (account.get("mvp_url") or "").strip()
+
+            payload_base = {
+                "user_id": user_id,
+                "uid": uid,
+                "username": username,
+                "processed": summary["processed"],
+                "total": total_accounts,
+            }
+
+            if not uid:
+                reason = "Отсутствует UID"
+                summary["skipped"].append({"user_id": user_id, "reason": reason})
+                await emit({**payload_base, "status": "skipped", "error": reason})
+                continue
+
+            if not mvp_url:
+                reason = "Нет MVP ссылки"
+                summary["skipped"].append({"user_id": user_id, "uid": uid, "reason": reason})
+                await emit({**payload_base, "status": "skipped", "error": reason})
+                continue
+
+            result = await refresh_cookies_mvp(user_id, uid)
+
+            if result.get("success"):
+                summary["success"] += 1
+                await emit({**payload_base, "status": "success", "cookies": result.get("cookies", {})})
+            else:
+                summary["failed"] += 1
+                error_text = result.get("error", "Неизвестная ошибка")
+                summary["failures"].append({"user_id": user_id, "uid": uid, "error": error_text})
+                await emit({**payload_base, "status": "failed", "error": error_text})
+
+            await human_delay(*sleep_between)
+
+    return summary
 
 # ───────────────────────────────────────────────
 # 🎁 Извлечение награды из ответа
