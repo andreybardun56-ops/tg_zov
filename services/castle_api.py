@@ -5,7 +5,7 @@ import json
 import os
 import random
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
 
 import aiohttp
 from aiohttp import ClientError
@@ -26,30 +26,58 @@ def _accept_language(profile: Dict[str, Any]) -> str:
     return profile.get("accept_language") or "en-US,en;q=0.9"
 
 
+def _sec_ch_headers(profile: Dict[str, Any]) -> Dict[str, str]:
+    headers: Dict[str, str] = {}
+    if profile.get("sec_ch_ua"):
+        headers["Sec-Ch-Ua"] = profile["sec_ch_ua"]
+    if profile.get("sec_ch_ua_mobile"):
+        headers["Sec-Ch-Ua-Mobile"] = profile["sec_ch_ua_mobile"]
+    if profile.get("sec_ch_ua_platform"):
+        headers["Sec-Ch-Ua-Platform"] = profile["sec_ch_ua_platform"]
+    return headers
+
+
 def build_navigation_headers(profile: Dict[str, Any], referer: Optional[str] = None) -> Dict[str, str]:
     headers = {
         "User-Agent": profile.get("user_agent", "Mozilla/5.0"),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": _accept_language(profile),
+        "Accept-Encoding": "gzip, deflate, br",
         "Cache-Control": "max-age=0",
         "Pragma": "no-cache",
         "Upgrade-Insecure-Requests": "1",
+        "Connection": "keep-alive",
+        "Host": MVP_ORIGIN.host,
+        "Sec-Fetch-Site": "same-origin" if referer else "none",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-User": "?1",
+        "Sec-Fetch-Dest": "document",
     }
+    headers.update(_sec_ch_headers(profile))
     if referer:
         headers["Referer"] = referer
     return headers
 
 
 def build_ajax_headers(profile: Dict[str, Any], referer: str) -> Dict[str, str]:
-    return {
+    headers = {
         "User-Agent": profile.get("user_agent", "Mozilla/5.0"),
         "Accept": "application/json, text/javascript, */*; q=0.01",
         "Accept-Language": _accept_language(profile),
+        "Accept-Encoding": "gzip, deflate, br",
         "Referer": referer,
+        "Origin": str(MVP_ORIGIN),
         "X-Requested-With": "XMLHttpRequest",
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
+        "Connection": "keep-alive",
+        "Host": MVP_ORIGIN.host,
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Dest": "empty",
     }
+    headers.update(_sec_ch_headers(profile))
+    return headers
 
 
 async def human_delay(min_delay: float = 0.4, max_delay: float = 1.2) -> None:
@@ -182,6 +210,80 @@ async def refresh_cookies_mvp(user_id: str, uid: str) -> dict[str, Any]:
     except Exception as e:
         logger.exception(f"[COOKIES] ❌ Ошибка при обновлении cookies: {e}")
         return {"success": False, "error": str(e)}
+
+
+ProgressPayload = Dict[str, Any]
+ProgressCallback = Callable[[ProgressPayload], Awaitable[None]]
+
+
+async def refresh_all_cookies(
+    progress_callback: Optional[ProgressCallback] = None,
+    sleep_between: tuple[float, float] = (0.8, 1.6),
+) -> Dict[str, Any]:
+    """Обновляет cookies всех аккаунтов, используя aiohttp MVP-подход."""
+
+    from .accounts_manager import get_all_users_accounts
+
+    accounts_by_user = get_all_users_accounts()
+    total_accounts = sum(len(accs) for accs in accounts_by_user.values())
+
+    summary: Dict[str, Any] = {
+        "total": total_accounts,
+        "processed": 0,
+        "success": 0,
+        "failed": 0,
+        "skipped": [],
+        "failures": [],
+    }
+
+    async def emit(payload: ProgressPayload) -> None:
+        if progress_callback:
+            try:
+                await progress_callback(payload)
+            except Exception:
+                logger.exception("[COOKIES] Ошибка в progress_callback")
+
+    for user_id, accounts in accounts_by_user.items():
+        for account in accounts:
+            summary["processed"] += 1
+            uid = (account.get("uid") or "").strip()
+            username = account.get("username") or "Игрок"
+            mvp_url = (account.get("mvp_url") or "").strip()
+
+            payload_base = {
+                "user_id": user_id,
+                "uid": uid,
+                "username": username,
+                "processed": summary["processed"],
+                "total": total_accounts,
+            }
+
+            if not uid:
+                reason = "Отсутствует UID"
+                summary["skipped"].append({"user_id": user_id, "reason": reason})
+                await emit({**payload_base, "status": "skipped", "error": reason})
+                continue
+
+            if not mvp_url:
+                reason = "Нет MVP ссылки"
+                summary["skipped"].append({"user_id": user_id, "uid": uid, "reason": reason})
+                await emit({**payload_base, "status": "skipped", "error": reason})
+                continue
+
+            result = await refresh_cookies_mvp(user_id, uid)
+
+            if result.get("success"):
+                summary["success"] += 1
+                await emit({**payload_base, "status": "success", "cookies": result.get("cookies", {})})
+            else:
+                summary["failed"] += 1
+                error_text = result.get("error", "Неизвестная ошибка")
+                summary["failures"].append({"user_id": user_id, "uid": uid, "error": error_text})
+                await emit({**payload_base, "status": "failed", "error": error_text})
+
+            await human_delay(*sleep_between)
+
+    return summary
 
 # ───────────────────────────────────────────────
 # 🎁 Извлечение награды из ответа

@@ -9,6 +9,7 @@ from aiogram.types import Message
 
 from config import ADMIN_IDS
 from services.flop_pair import run_flop_pair, find_flop_pairs
+from services.castle_api import refresh_all_cookies
 from services.castle_machine import run_castle_machine
 from services.thanksgiving_event import run_thanksgiving_event
 from services.promo_code import run_promo_code, load_promo_history, save_promo_history
@@ -36,76 +37,43 @@ async def handle_update_cookies(message: Message):
     await message.answer("♻️ Запускаю обновление cookies в фоне...")
 
     async def background_update():
-        from services.accounts_manager import get_all_users_accounts
-        from services.castle_api import refresh_cookies_mvp
+        async def progress(payload: dict):
+            idx = payload.get("processed", 0)
+            total = payload.get("total", 0) or 1
+            username = payload.get("username") or "Игрок"
+            uid = payload.get("uid") or "—"
+            status = payload.get("status")
+            error_text = payload.get("error")
 
-        accounts_by_user = get_all_users_accounts()
-        logger.info(f"[COOKIES] Всего пользователей найдено: {len(accounts_by_user)}")
+            prefix = f"🔁 <b>{idx}/{total}</b> — <b>{username}</b> (<code>{uid}</code>): "
+            if status == "success":
+                await message.answer(prefix + "✅ cookies обновлены", parse_mode="HTML")
+            elif status == "skipped":
+                await message.answer(prefix + f"⚠️ пропуск ({error_text})", parse_mode="HTML")
+            elif status == "failed":
+                await message.answer(prefix + f"❌ ошибка: <i>{error_text}</i>", parse_mode="HTML")
 
-        total_success = 0
-        failures = []
-        skipped = []
-
-        total_accounts = sum(len(v) for v in accounts_by_user.values())
-        done = 0
-
-        for user_id, accounts in accounts_by_user.items():
-            for account in accounts:
-                done += 1
-                uid = account.get("uid", "").strip()
-                mvp_url = account.get("mvp_url", "").strip()
-                username = account.get("username", "Игрок")
-
-                if not uid:
-                    skipped.append(f"{user_id}: отсутствует UID")
-                    continue
-
-                if not mvp_url:
-                    skipped.append(f"{user_id}:{uid} — нет MVP ссылки")
-                    continue
-
-                progress = f"{done}/{total_accounts}"
-                await message.answer(
-                    f"🔁 <b>{progress}</b> — обновляю cookies для <b>{username}</b> (<code>{uid}</code>)...",
-                    parse_mode="HTML"
-                )
-
-                try:
-                    result = await refresh_cookies_mvp(user_id, uid)
-                    if result.get("success"):
-                        total_success += 1
-                        await message.answer(f"✅ Успешно обновлено: <code>{uid}</code>", parse_mode="HTML")
-                    else:
-                        error_text = result.get("error", "неизвестная ошибка")
-                        failures.append(f"{user_id}:{uid} — {error_text}")
-                        await message.answer(
-                            f"⚠️ Не удалось обновить <b>{username}</b> (<code>{uid}</code>): <i>{error_text}</i>",
-                            parse_mode="HTML"
-                        )
-                except Exception as exc:
-                    logger.exception(f"[COOKIES] ❌ Ошибка при обновлении cookies {user_id}:{uid}: {exc}")
-                    failures.append(f"{user_id}:{uid} — исключение: {exc}")
-                    await message.answer(
-                        f"❌ Ошибка при обработке <code>{uid}</code>: {exc}",
-                        parse_mode="HTML"
-                    )
-
-                await asyncio.sleep(2)
+        summary = await refresh_all_cookies(progress_callback=progress)
 
         summary_lines = [
             "📊 <b>Итоги обновления cookies:</b>",
-            f"• ✅ Успешно: <b>{total_success}</b>",
-            f"• ❌ Ошибки: <b>{len(failures)}</b>",
-            f"• ⚠️ Пропущено: <b>{len(skipped)}</b>",
+            f"• ✅ Успешно: <b>{summary['success']}</b>",
+            f"• ❌ Ошибки: <b>{summary['failed']}</b>",
+            f"• ⚠️ Пропущено: <b>{len(summary['skipped'])}</b>",
+            f"• Всего аккаунтов: <b>{summary['total']}</b>",
         ]
 
-        if failures:
+        if summary["failures"]:
             summary_lines.append("\n❌ <b>Ошибки:</b>")
-            summary_lines.extend(f" - {item}" for item in failures)
+            summary_lines.extend(
+                f" - {item['user_id']}:{item.get('uid', '—')} — {item['error']}" for item in summary["failures"]
+            )
 
-        if skipped:
+        if summary["skipped"]:
             summary_lines.append("\n⚠️ <b>Пропущенные аккаунты:</b>")
-            summary_lines.extend(f" - {item}" for item in skipped)
+            summary_lines.extend(
+                f" - {item['user_id']}:{item.get('uid', '—')} — {item['reason']}" for item in summary["skipped"]
+            )
 
         await message.answer("\n".join(summary_lines), parse_mode="HTML")
 
