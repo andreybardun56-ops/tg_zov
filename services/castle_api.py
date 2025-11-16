@@ -20,7 +20,6 @@ MVP_ORIGIN = URL("https://castleclash.igg.com/")
 CDKEY_ENDPOINT = MVP_ORIGIN / "event/cdkey/ajax.req.php"
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=45)
 IMPORTANT_COOKIES = {"ak_bmsc", "_abck", "bm_sz", "castle_age_sess"}
-REQUIRED_COOKIES = {"_abck", "castle_age_sess"}
 
 
 def _accept_language(profile: Dict[str, Any]) -> str:
@@ -117,16 +116,6 @@ async def fetch_mvp_page(
         logger.info("[COOKIES] 📄 Загружена MVP-страница (%s)", resp.status)
         return text
 
-
-def ensure_required_cookies(cookies: Dict[str, str]) -> tuple[bool, set[str]]:
-    """Проверяет наличие критически важных cookies от Akamai."""
-
-    if not cookies:
-        return False, REQUIRED_COOKIES
-
-    missing = {name for name in REQUIRED_COOKIES if name not in cookies}
-    return not missing, missing
-
 # ───────────────────────────────────────────────
 # 🧱 Работа с cookies.json
 # ───────────────────────────────────────────────
@@ -162,10 +151,7 @@ async def refresh_cookies_mvp(user_id: str, uid: str) -> dict[str, Any]:
 
     mvp_url = acc["mvp_url"]
     profile = get_random_browser_profile()
-    # Запускаем процесс со свежей банкой cookies, чтобы новые значения
-    # приходили исключительно после фактической загрузки MVP-страницы,
-    # а не подтягивались из ранее сохранённых данных.
-    jar = init_cookie_jar()
+    jar = init_cookie_jar(load_cookies_for_account(user_id, uid))
     connector = aiohttp.TCPConnector(limit=0, ttl_dns_cache=600)
 
     try:
@@ -179,22 +165,13 @@ async def refresh_cookies_mvp(user_id: str, uid: str) -> dict[str, Any]:
             await human_delay(0.3, 0.9)
 
             cookies_result = cookies_from_jar(session.cookie_jar, mvp_url)
-            ok, missing = ensure_required_cookies(cookies_result)
-            if ok:
+            if cookies_result:
                 all_data = load_all_cookies()
                 all_data.setdefault(str(user_id), {})[str(uid)] = cookies_result
                 save_all_cookies(all_data)
                 log_cookie_inventory(session.cookie_jar, "финал")
                 logger.info(f"[COOKIES] 💾 Cookies обновлены для UID={uid}")
                 return {"success": True, "cookies": cookies_result, "html": html}
-
-            if cookies_result:
-                logger.warning(
-                    "[COOKIES] ⚠️ Cookies получены, но отсутствуют критичные: %s",
-                    ", ".join(sorted(missing)) or "?",
-                )
-            else:
-                logger.warning(f"[COOKIES] ⚠️ Банка cookies пустая для UID={uid}")
 
             logger.warning(f"[COOKIES] ⚠️ Не удалось получить cookies для UID={uid}")
             return {"success": False, "error": "Не удалось получить cookies"}
