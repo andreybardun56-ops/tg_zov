@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import random
+import re
 import platform
 import shutil
 from pathlib import Path
@@ -163,6 +164,27 @@ def get_random_browser_profile() -> Dict[str, Any]:
     device_scale_factor = random.choice([1, 1, 1.5, 2])
     hardware_concurrency = random.choice([2, 4, 6, 8])
 
+    chrome_match = re.search(r"Chrome/(\d+)", ua)
+    chrome_version = chrome_match.group(1) if chrome_match else "120"
+
+    if "Android" in ua:
+        platform = "Android"
+        sec_platform = '"Android"'
+    elif "iPhone" in ua or "iPad" in ua:
+        platform = "iOS"
+        sec_platform = '"iOS"'
+    elif "Macintosh" in ua:
+        platform = "macOS"
+        sec_platform = '"macOS"'
+    else:
+        platform = "Windows"
+        sec_platform = '"Windows"'
+
+    sec_ch_ua = (
+        f'"Not/A)Brand";v="8", "Chromium";v="{chrome_version}", '
+        f'"Google Chrome";v="{chrome_version}"'
+    )
+
     return {
         "user_agent": ua,
         "viewport": vp,
@@ -172,6 +194,10 @@ def get_random_browser_profile() -> Dict[str, Any]:
         "is_mobile": is_mobile,
         "device_scale_factor": device_scale_factor,
         "hardware_concurrency": hardware_concurrency,
+        "platform": platform,
+        "sec_ch_ua": sec_ch_ua,
+        "sec_ch_ua_mobile": "?1" if is_mobile else "?0",
+        "sec_ch_ua_platform": sec_platform,
     }
 
 
