@@ -20,6 +20,11 @@ MVP_ORIGIN = URL("https://castleclash.igg.com/")
 CDKEY_ENDPOINT = MVP_ORIGIN / "event/cdkey/ajax.req.php"
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=45)
 IMPORTANT_COOKIES = {"ak_bmsc", "_abck", "bm_sz", "castle_age_sess"}
+AKAMAI_WARMUP_PATHS = [
+    "/akam/11/pixel_1",
+    "/akam/11/pixel_2",
+    "/akam/11/pixel_3",
+]
 
 
 def _accept_language(profile: Dict[str, Any]) -> str:
@@ -122,6 +127,30 @@ async def warmup_root(session: aiohttp.ClientSession, profile: Dict[str, Any]) -
         logger.warning("[COOKIES] ⚠️ Ошибка прогрева castleclash: %s", e)
 
 
+async def warmup_akamai(session: aiohttp.ClientSession, profile: Dict[str, Any]) -> None:
+    """Дёргаем akamai pixel-ресурсы, чтобы заранее получить ak_bmsc/bm_sz."""
+
+    headers = build_navigation_headers(profile)
+    success = False
+
+    for path in AKAMAI_WARMUP_PATHS:
+        try:
+            async with session.get(str(MVP_ORIGIN.with_path(path)), headers=headers) as resp:
+                await resp.read()
+                if resp.status == 200:
+                    success = True
+                    logger.info("[COOKIES] 🛡️ Akamai pixel %s => %s", path, resp.status)
+                else:
+                    logger.info("[COOKIES] 🛡️ Akamai pixel %s => %s", path, resp.status)
+        except ClientError as e:
+            logger.warning("[COOKIES] ⚠️ Akamai pixel %s: %s", path, e)
+
+    if success:
+        log_cookie_inventory(session.cookie_jar, "после Akamai пикселей")
+    else:
+        logger.warning("[COOKIES] ⚠️ Не удалось прогреть Akamai пиксели")
+
+
 async def warmup_ajax(session: aiohttp.ClientSession, profile: Dict[str, Any], referer: str) -> None:
     params = {"action": "get_time", "_": str(random.randint(10_000, 999_999))}
     headers = build_ajax_headers(profile, referer)
@@ -184,6 +213,8 @@ async def refresh_cookies_mvp(user_id: str, uid: str) -> dict[str, Any]:
 
     try:
         async with aiohttp.ClientSession(cookie_jar=jar, timeout=REQUEST_TIMEOUT, connector=connector) as session:
+            await warmup_akamai(session, profile)
+            await human_delay(0.2, 0.5)
             await warmup_root(session, profile)
             log_cookie_inventory(session.cookie_jar, "после прогрева")
             await human_delay()
@@ -358,6 +389,8 @@ async def extract_player_info_from_page(url: str) -> dict:
 
     try:
         async with aiohttp.ClientSession(cookie_jar=jar, timeout=REQUEST_TIMEOUT, connector=connector) as session:
+            await warmup_akamai(session, profile)
+            await human_delay(0.2, 0.5)
             await warmup_root(session, profile)
             await warmup_ajax(session, profile, url)
             await human_delay(0.4, 1.0)
