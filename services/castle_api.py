@@ -1,6 +1,7 @@
 """Работа с castleclash MVP через HTTP (aiohttp)."""
 
 import asyncio
+import html
 import json
 import os
 import random
@@ -348,7 +349,27 @@ def extract_reward_from_response(text: str) -> str:
 # 🌐 Извлечение IGG ID и имени со страницы MVP (через browser_patches)
 # ───────────────────────────────────────────────
 
-def _parse_player_info(html: str) -> Dict[str, Optional[str]]:
+PLACEHOLDER_NAME_RE = re.compile(r"\{\{\s*(?:charname|username|name)\s*\}\}", re.IGNORECASE)
+
+
+def _cleanup_player_name(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    normalized = html.unescape(value).strip()
+    if not normalized:
+        return None
+    if PLACEHOLDER_NAME_RE.fullmatch(normalized):
+        return None
+    if "charName" in normalized and normalized.count("{") >= 2:
+        return None
+    return normalized
+
+
+def _strip_html_tags(raw_html: str) -> str:
+    return re.sub(r"<[^>]+>", " ", raw_html)
+
+
+def _parse_player_info(raw_html: str) -> Dict[str, Optional[str]]:
     result: Dict[str, Optional[str]] = {"uid": None, "username": None}
 
     igg_patterns = [
@@ -358,7 +379,7 @@ def _parse_player_info(html: str) -> Dict[str, Optional[str]]:
         r'"uid"\s*:\s*"(\d{6,12})"',
     ]
     for pattern in igg_patterns:
-        match = re.search(pattern, html, re.IGNORECASE)
+        match = re.search(pattern, raw_html, re.IGNORECASE)
         if match:
             result["uid"] = match.group(1)
             break
@@ -369,15 +390,28 @@ def _parse_player_info(html: str) -> Dict[str, Optional[str]]:
         r'"playername"\s*:\s*"([^"]+)"',
         r'"username"\s*:\s*"([^"]+)"',
         r'"name"\s*:\s*"([^"]+)"',
+        r'data-playername\s*=\s*"([^"]+)"',
     ]
+
+    username: Optional[str] = None
     for pattern in name_patterns:
-        match = re.search(pattern, html, re.IGNORECASE)
+        match = re.search(pattern, raw_html, re.IGNORECASE)
         if match:
-            result["username"] = match.group(1).strip()
-            break
+            username = _cleanup_player_name(match.group(1))
+            if username:
+                break
 
+    if not username:
+        plain_text = _strip_html_tags(raw_html)
+        for pattern in name_patterns:
+            match = re.search(pattern, plain_text, re.IGNORECASE)
+            if match:
+                username = _cleanup_player_name(match.group(1))
+                if username:
+                    break
+
+    result["username"] = username
     return result
-
 
 async def extract_player_info_from_page(url: str) -> dict:
     """Запрашивает MVP-ссылку через aiohttp и парсит IGG ID + имя."""
