@@ -9,7 +9,7 @@ from aiogram import Router, types, F
 from aiogram.filters import Command
 from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton,
-    CallbackQuery
+    CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 )
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, ReplyKeyboardRemove
@@ -32,10 +32,21 @@ from services.accounts_manager import load_all_users
 from services.farm_puzzles_auto import (
     is_farm_running,
     start_farm,
-    stop_farm
+    stop_farm,
+    has_saved_state
+)
+from services.farm_puzzles_duplicates_auto import (
+    start_farm as start_duplicates_farm,
+    is_farm_running as is_duplicates_running
 )
 
-from services.castle_api import extract_player_info_from_page, refresh_cookies_mvp
+from services.castle_api import (
+    extract_player_info_from_page,
+    refresh_cookies_mvp,
+    login_shop_email,
+    start_shop_login_igg,
+    complete_shop_login_igg,
+)
 from services.event_manager import run_full_event_cycle
 from keyboards.inline import (
     get_delete_accounts_kb,
@@ -53,6 +64,7 @@ USER_ACCOUNTS_FILE = "data/user_accounts.json"
 PARALLEL_REFRESH_PROCESSES = 2
 COOKIE_REFRESH_TASKS: List[asyncio.Task] = []
 COOKIE_REFRESH_STATUS_MESSAGE: Optional[types.Message] = None
+SHOP_LOGIN_SESSIONS: dict[str, dict] = {}
 
 for path in (
     Path("data/chrome_profiles"),
@@ -64,6 +76,14 @@ for path in (
     path.mkdir(parents=True, exist_ok=True)
 
 CLAIM_PUZZLES_CB = "claim_puzzles"
+
+
+class AddAccountState(StatesGroup):
+    waiting_mvp_url = State()
+    waiting_email = State()
+    waiting_password = State()
+    waiting_igg_id = State()
+    waiting_igg_code = State()
 
 def is_cookie_refresh_running() -> bool:
     return any(task for task in COOKIE_REFRESH_TASKS if not task.done())
@@ -116,12 +136,19 @@ admin_events_menu = ReplyKeyboardMarkup(
 
 # 🧩 Подменю пазлов
 def get_admin_puzzles_menu() -> ReplyKeyboardMarkup:
+    farm_controls = []
     if is_farm_running():
-        farm_btn = "⏸ Пауза фарма"
-        stop_btn = "⛔️ Остановить фарм"
+        farm_controls.extend([
+            KeyboardButton(text="⛔️ Остановить фарм"),
+            KeyboardButton(text="⏸ Пауза фарма"),
+        ])
+    elif has_saved_state():
+        farm_controls.extend([
+            KeyboardButton(text="▶️ Продолжить фарм"),
+            KeyboardButton(text="⛔️ Остановить фарм"),
+        ])
     else:
-        farm_btn = "▶️ Продолжить фарм"
-        stop_btn = None
+        farm_controls.append(KeyboardButton(text="🧩 Фарм пазлов"))
 
     keyboard = [
         [KeyboardButton(text="━━━━━━━━━━━ 🧩 Пазлы ━━━━━━━━━━━")],
@@ -131,12 +158,12 @@ def get_admin_puzzles_menu() -> ReplyKeyboardMarkup:
         ],
         [
             KeyboardButton(text="🧩 Собрать пазл"),
-            KeyboardButton(text=farm_btn),
+            KeyboardButton(text="🧩 Фарм дублей"),
         ],
     ]
 
-    if stop_btn:
-        keyboard.append([KeyboardButton(text=stop_btn)])
+    if farm_controls:
+        keyboard.append(farm_controls)
 
     keyboard.append([KeyboardButton(text="🔙 Назад к событиям")])
 
@@ -206,6 +233,49 @@ async def back_to_main_admin(message: types.Message):
         await message.answer("🏠 Главное админ-меню:", reply_markup=admin_main_menu)
     else:
         await message.answer("🚫 У тебя нет доступа.")
+
+
+@router.message(F.text == "📊 Статистика")
+async def show_stats(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("🚫 У тебя нет доступа.")
+        return
+
+    users = load_all_users()
+    total_users = len(users)
+    total_accounts = sum(len(accs) for accs in users.values())
+
+    lines = [
+        "📊 <b>Статистика аккаунтов</b>",
+        f"👥 Пользователей в базе: <b>{total_users}</b>",
+        f"👤 Всего аккаунтов: <b>{total_accounts}</b>",
+        "",
+        "👥 <b>Аккаунты по пользователям:</b>",
+    ]
+
+    if total_users == 0:
+        lines.append("— нет данных")
+    else:
+        for user_id, accs in users.items():
+            lines.append(f"• <code>{user_id}</code> — <b>{len(accs)}</b> аккаунтов")
+
+    summary_path = Path("data/puzzle_summary.json")
+    if summary_path.exists():
+        try:
+            with open(summary_path, "r", encoding="utf-8") as f:
+                summary = json.load(f)
+            totals = summary.get("totals", {})
+            all_dup = summary.get("all_duplicates", 0)
+            lines.extend([
+                "",
+                "🧩 <b>Пазлы (итоги)</b>",
+                f"Всего дубликатов: <b>{all_dup}</b>",
+                " | ".join(f"{pid}🧩x{totals.get(str(pid), 0)}" for pid in range(1, 10)),
+            ])
+        except Exception:
+            lines.append("\n⚠️ Не удалось прочитать puzzle_summary.json")
+
+    await message.answer("\n".join(lines), parse_mode="HTML")
 
 @router.message(F.text == "🎯 События")
 async def open_events_menu(message: types.Message):
@@ -292,13 +362,40 @@ async def manage_accounts(message: types.Message):
 
 # ➕ Добавить аккаунт
 @router.message(F.text == "➕ Добавить аккаунт")
-async def ask_for_mvp_link(message: types.Message):
-    await message.answer("📎 Отправь свою MVP ссылку, чтобы я добавил аккаунт.")
+async def ask_for_add_method(message: types.Message, state: FSMContext):
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔗 URL (MVP ссылка)", callback_data="add_acc:mvp")],
+            [InlineKeyboardButton(text="🆔 IGG ID + код", callback_data="add_acc:igg")],
+            [InlineKeyboardButton(text="📧 Почта и пароль", callback_data="add_acc:email")],
+        ]
+    )
+    await state.clear()
+    await message.answer("Выбери способ добавления аккаунта:", reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("add_acc:"))
+async def choose_add_method(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    method = callback.data.split(":", 1)[1]
+    if method == "mvp":
+        await state.set_state(AddAccountState.waiting_mvp_url)
+        await callback.message.answer("📎 Отправь свою MVP ссылку, чтобы я добавил аккаунт.")
+        return
+    if method == "email":
+        await state.set_state(AddAccountState.waiting_email)
+        await callback.message.answer("📧 Введи почту для входа:")
+        return
+    if method == "igg":
+        await state.set_state(AddAccountState.waiting_igg_id)
+        await callback.message.answer("🆔 Введи IGG ID:")
+        return
+    await callback.message.answer("⚠️ Неизвестный способ добавления.")
 
 
 # 🧠 Добавление аккаунта по MVP ссылке
-@router.message(F.text.contains("castleclash.igg.com") & F.text.contains("signed_key"))
-async def add_account_from_mvp(message: types.Message):
+@router.message(AddAccountState.waiting_mvp_url, F.text.contains("castleclash.igg.com"))
+async def add_account_from_mvp(message: types.Message, state: FSMContext):
     user_id = str(message.from_user.id)
     url = message.text.strip()
 
@@ -350,8 +447,146 @@ async def add_account_from_mvp(message: types.Message):
 
     await message.answer(msg, parse_mode="HTML")
 
+    await state.clear()
+
     await message.answer("🎯 Запускаю автоматическую проверку акций...")
     asyncio.create_task(run_full_event_cycle(bot=message.bot, manual=True))
+
+
+@router.message(AddAccountState.waiting_email)
+async def add_account_by_email(message: types.Message, state: FSMContext):
+    email = message.text.strip()
+    await state.update_data(email=email)
+    await state.set_state(AddAccountState.waiting_password)
+    await message.answer("🔐 Введи пароль от аккаунта:")
+
+
+@router.message(AddAccountState.waiting_password)
+async def add_account_by_email_password(message: types.Message, state: FSMContext):
+    user_id = str(message.from_user.id)
+    password = message.text.strip()
+    data = await state.get_data()
+    email = data.get("email")
+
+    await message.answer("🔍 Выполняю вход, подожди...")
+    result = await login_shop_email(email, password)
+    if not result.get("success"):
+        err = escape(str(result.get("error", "неизвестно")))
+        await message.answer(f"❌ Ошибка входа: <code>{err}</code>", parse_mode="HTML")
+        await state.clear()
+        return
+
+    uid = result.get("uid")
+    username = result.get("username", "Игрок")
+    cookies = result.get("cookies", {})
+
+    all_data = load_all_users()
+    for other_user, acc_list in all_data.items():
+        if any(acc.get("uid") == uid for acc in acc_list):
+            await message.answer("⚠️ Этот IGG ID уже добавлен другим пользователем.")
+            await state.clear()
+            return
+
+    accounts = load_accounts(user_id)
+    if any(acc.get("uid") == uid for acc in accounts):
+        await message.answer(f"⚠️ Аккаунт <code>{uid}</code> уже есть.", parse_mode="HTML")
+        await state.clear()
+        return
+
+    new_acc = {"uid": uid, "username": username, "mvp_url": ""}
+    accounts.append(new_acc)
+    save_accounts(user_id, accounts)
+
+    if cookies:
+        from services.cookies_io import load_all_cookies, save_all_cookies
+        all_cookies = load_all_cookies()
+        all_cookies.setdefault(user_id, {})[uid] = cookies
+        save_all_cookies(all_cookies)
+
+    await message.answer(
+        f"✅ Аккаунт <b>{username}</b> (IGG ID: <code>{uid}</code>) добавлен!",
+        parse_mode="HTML",
+    )
+
+    await state.clear()
+
+
+@router.message(AddAccountState.waiting_igg_id)
+async def add_account_by_igg(message: types.Message, state: FSMContext):
+    user_id = str(message.from_user.id)
+    igg_id = message.text.strip()
+
+    await message.answer("📨 Запрашиваю код подтверждения...")
+    result = await start_shop_login_igg(igg_id)
+    if not result.get("success"):
+        err = escape(str(result.get("error", "неизвестно")))
+        await message.answer(f"❌ Ошибка: <code>{err}</code>", parse_mode="HTML")
+        await state.clear()
+        return
+
+    SHOP_LOGIN_SESSIONS[user_id] = result
+    await state.update_data(igg_id=igg_id)
+    await state.set_state(AddAccountState.waiting_igg_code)
+    await message.answer("✅ Код отправлен на игровую почту. Введи код:")
+
+
+@router.message(AddAccountState.waiting_igg_code)
+async def add_account_by_igg_code(message: types.Message, state: FSMContext):
+    user_id = str(message.from_user.id)
+    code = message.text.strip()
+
+    session = SHOP_LOGIN_SESSIONS.pop(user_id, None)
+    if not session:
+        await message.answer("⚠️ Сессия авторизации не найдена. Попробуй ещё раз.")
+        await state.clear()
+        return
+
+    await message.answer("🔍 Проверяю код...")
+    result = await complete_shop_login_igg(
+        session["context"],
+        session["page"],
+        code,
+        playwright=session.get("playwright"),
+    )
+    if not result.get("success"):
+        err = escape(str(result.get("error", "неизвестно")))
+        await message.answer(f"❌ Ошибка входа: <code>{err}</code>", parse_mode="HTML")
+        await state.clear()
+        return
+
+    uid = result.get("uid") or session.get("igg_id")
+    username = result.get("username", "Игрок")
+    cookies = result.get("cookies", {})
+
+    all_data = load_all_users()
+    for other_user, acc_list in all_data.items():
+        if any(acc.get("uid") == uid for acc in acc_list):
+            await message.answer("⚠️ Этот IGG ID уже добавлен другим пользователем.")
+            await state.clear()
+            return
+
+    accounts = load_accounts(user_id)
+    if any(acc.get("uid") == uid for acc in accounts):
+        await message.answer(f"⚠️ Аккаунт <code>{uid}</code> уже есть.", parse_mode="HTML")
+        await state.clear()
+        return
+
+    new_acc = {"uid": uid, "username": username, "mvp_url": ""}
+    accounts.append(new_acc)
+    save_accounts(user_id, accounts)
+
+    if cookies:
+        from services.cookies_io import load_all_cookies, save_all_cookies
+        all_cookies = load_all_cookies()
+        all_cookies.setdefault(user_id, {})[uid] = cookies
+        save_all_cookies(all_cookies)
+
+    await message.answer(
+        f"✅ Аккаунт <b>{username}</b> (IGG ID: <code>{uid}</code>) добавлен!",
+        parse_mode="HTML",
+    )
+
+    await state.clear()
 # 🗑 Удалить аккаунт (через inline кнопки)
 @router.message(F.text == "🗑 Удалить аккаунт")
 async def delete_account_prompt(message: types.Message):
@@ -642,7 +877,7 @@ async def start_farm_puzzles(message: types.Message):
         await message.answer("🚫 У тебя нет доступа к этой функции.")
         return
 
-    started = await start_farm(message.bot)
+    started = await start_farm(message.bot, resume=False)
     if started:
         await message.answer(
             "⏳ Запускаю фарм пазлов... Это может занять несколько минут.",
@@ -709,6 +944,31 @@ async def stop_farm_puzzles(message: types.Message):
             reply_markup=get_admin_puzzles_menu()
         )
 
+@router.message(F.text == "🧩 Фарм дублей")
+async def start_farm_duplicates(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("🚫 У тебя нет доступа.")
+        return
+
+    if is_duplicates_running():
+        await message.answer(
+            "⚙️ Фарм дублей уже выполняется.",
+            reply_markup=get_admin_puzzles_menu()
+        )
+        return
+
+    started = await start_duplicates_farm(message.bot)
+    if started:
+        await message.answer(
+            "⏳ Запускаю фарм дублей... Это может занять несколько минут.",
+            reply_markup=get_admin_puzzles_menu()
+        )
+    else:
+        await message.answer(
+            "⚠️ Не удалось запустить фарм дублей. Попробуй позже.",
+            reply_markup=get_admin_puzzles_menu()
+        )
+
 # --- Подменю "Пазлы" (reply-кнопки) ---
 puzzle_submenu = ReplyKeyboardMarkup(
     keyboard=[
@@ -720,6 +980,7 @@ puzzle_submenu = ReplyKeyboardMarkup(
             KeyboardButton(text="🧩 Собрать пазл"),
             KeyboardButton(text="♻️ Обменять пазлы")
         ],
+        [KeyboardButton(text="🧩 Фарм дублей")],
         [KeyboardButton(text="🔙 Назад")]
     ],
     resize_keyboard=True

@@ -16,6 +16,14 @@ from services.thanksgiving_event import run_thanksgiving_event
 from services.castle_machine import run_castle_machine
 from services.lucky_wheel_auto import run_lucky_wheel
 from services.dragon_quest import run_dragon_quest
+from services.browser_patches import (
+    launch_masked_persistent_context,
+    get_random_browser_profile,
+    cookies_to_playwright,
+    BROWSER_PATH,
+)
+from services.cookies_io import load_all_cookies, save_all_cookies
+from playwright.async_api import async_playwright
 
 logger = logging.getLogger("event_manager")
 
@@ -150,74 +158,141 @@ async def run_full_event_cycle(bot=None, manual=False):
         logger.info("⏸ Puzzle2 указана, но фактически не активна — пропускаем фарм.")
         active_events.remove("puzzle2")
 
-    for event_key in active_events:
-        handler = EVENT_HANDLERS.get(event_key)
-        if not handler:
-            logger.warning(f"[{event_key}] ⚠️ Нет обработчика — пропуск.")
-            continue
+    async def _send_result(event_key: str, user_id: str, uid: str, username: str, result: dict):
+        nonlocal total_success, total_errors, total_attempts_over, summary_lines
+        msg = result.get("message", "❓ Нет ответа")
+        success = result.get("success", False)
+        msg_text = result.get("message", "").lower()
 
-        logger.info(f"▶️ Запуск обработки события: {event_key}")
+        if "попытки" in msg_text and "закончились" in msg_text:
+            prefix = "⚙️"
+            total_attempts_over += 1
+        elif success:
+            prefix = "✅"
+            total_success += 1
+        else:
+            prefix = "⚠️"
+            total_errors += 1
+
+        summary_lines.append(f"{prefix} <b>{username}</b> — {event_key}: {msg}")
+
+        import re
+        import html
+
+        if bot:
+            try:
+                clean_msg = re.sub(r"<[^>]+>", "", str(msg))
+                safe_msg = html.escape(clean_msg)
+
+                if success:
+                    await bot.send_message(
+                        user_id,
+                        f"✅ {event_key}: {safe_msg[:3800]}",
+                        parse_mode="HTML"
+                    )
+                else:
+                    await bot.send_message(
+                        ADMIN_IDS[0],
+                        f"❌ [{event_key}] {username} ({uid}): {safe_msg[:3800]}",
+                        parse_mode="HTML"
+                    )
+            except Exception as e:
+                logger.warning(f"[Telegram send] Ошибка отправки ({event_key}): {e}")
+                try:
+                    await bot.send_message(
+                        user_id if success else ADMIN_IDS[0],
+                        f"{'✅' if success else '❌'} [{event_key}] {msg[:3800]}",
+                        parse_mode=None
+                    )
+                except Exception as inner:
+                    logger.error(f"[Telegram send] Повторная ошибка ({event_key}): {inner}")
+
+        await asyncio.sleep(1)
+
+    async def run_with_single_session(event_keys: list[str]):
+        nonlocal total_errors
+        cookies_db = load_all_cookies()
         for user_id, accounts in all_users.items():
             for acc in accounts:
                 uid = str(acc.get("uid"))
                 username = acc.get("username", "Игрок")
-                try:
-                    result = await handler(user_id, uid)
-                    msg = result.get("message", "❓ Нет ответа")
-                    success = result.get("success", False)
-                    msg_text = result.get("message", "").lower()
+                if not uid:
+                    continue
 
-                    if "попытки" in msg_text and "закончились" in msg_text:
-                        prefix = "⚙️"
-                        total_attempts_over += 1
-                    elif success:
-                        prefix = "✅"
-                        total_success += 1
-                    else:
-                        prefix = "⚠️"
-                        total_errors += 1
+                async with async_playwright() as p:
+                    profile = get_random_browser_profile()
+                    ctx = await launch_masked_persistent_context(
+                        p,
+                        user_data_dir=f"data/chrome_profiles/{uid}_events",
+                        browser_path=BROWSER_PATH,
+                        headless=True,
+                        slow_mo=30,
+                        profile=profile,
+                    )
+                    context = ctx["context"]
+                    page = ctx["page"]
 
-                    summary_lines.append(f"{prefix} <b>{username}</b> — {event_key}: {msg}")
+                    try:
+                        acc_cookies = cookies_db.get(str(user_id), {}).get(str(uid), {})
+                        if acc_cookies:
+                            await context.add_cookies(cookies_to_playwright(acc_cookies))
 
-                    # Telegram уведомления (с безопасной очисткой HTML)
-                    import re
-                    import html
+                        for event_key in event_keys:
+                            handler = EVENT_HANDLERS.get(event_key)
+                            if not handler:
+                                logger.warning(f"[{event_key}] ⚠️ Нет обработчика — пропуск.")
+                                continue
 
-                    if bot:
-                        try:
-                            clean_msg = re.sub(r"<[^>]+>", "", str(msg))
-                            safe_msg = html.escape(clean_msg)
-
-                            if success:
-                                await bot.send_message(
-                                    user_id,
-                                    f"✅ {event_key}: {safe_msg[:3800]}",
-                                    parse_mode="HTML"
-                                )
-                            else:
-                                await bot.send_message(
-                                    ADMIN_IDS[0],
-                                    f"❌ [{event_key}] {username} ({uid}): {safe_msg[:3800]}",
-                                    parse_mode="HTML"
-                                )
-                        except Exception as e:
-                            logger.warning(f"[Telegram send] Ошибка отправки ({event_key}): {e}")
+                            logger.info(f"▶️ Запуск обработки события: {event_key}")
                             try:
-                                await bot.send_message(
-                                    user_id if success else ADMIN_IDS[0],
-                                    f"{'✅' if success else '❌'} [{event_key}] {msg[:3800]}",
-                                    parse_mode=None
-                                )
-                            except Exception as inner:
-                                logger.error(f"[Telegram send] Повторная ошибка ({event_key}): {inner}")
+                                result = await handler(user_id, uid, context=context)
+                            except TypeError:
+                                result = await handler(user_id, uid)
 
-                    await asyncio.sleep(1)
+                            await _send_result(event_key, user_id, uid, username, result)
 
-                except Exception as e:
-                    total_errors += 1
-                    err = f"❌ [{event_key}] {username} ({uid}): {e}"
-                    logger.exception(err)
-                    summary_lines.append(err)
+                    except Exception as e:
+                        err = f"❌ [session] {username} ({uid}): {e}"
+                        logger.exception(err)
+                        total_errors += 1
+                        summary_lines.append(err)
+                    finally:
+                        try:
+                            if page:
+                                await page.close()
+                            if context:
+                                fresh = await context.cookies()
+                                fresh_map = {c["name"]: c["value"] for c in fresh if "name" in c}
+                                if fresh_map:
+                                    cookies_db.setdefault(str(user_id), {})[str(uid)] = fresh_map
+                                    save_all_cookies(cookies_db)
+                                await context.close()
+                        except Exception:
+                            pass
+
+    if manual:
+        await run_with_single_session(active_events)
+    else:
+        for event_key in active_events:
+            handler = EVENT_HANDLERS.get(event_key)
+            if not handler:
+                logger.warning(f"[{event_key}] ⚠️ Нет обработчика — пропуск.")
+                continue
+
+            logger.info(f"▶️ Запуск обработки события: {event_key}")
+            for user_id, accounts in all_users.items():
+                for acc in accounts:
+                    uid = str(acc.get("uid"))
+                    username = acc.get("username", "Игрок")
+                    try:
+                        result = await handler(user_id, uid)
+                        await _send_result(event_key, user_id, uid, username, result)
+
+                    except Exception as e:
+                        total_errors += 1
+                        err = f"❌ [{event_key}] {username} ({uid}): {e}"
+                        logger.exception(err)
+                        summary_lines.append(err)
 
     # 7️⃣ Итог
     summary = (
