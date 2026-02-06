@@ -825,21 +825,21 @@ async def main():
 
         start_time = time.perf_counter()
         stats = {"total": len(accounts), "success": 0, "fail": 0}
-        progress_state = {"processed_total": 0}
+        processed_total = 0
         logger.info("Всего аккаунтов: %d", len(accounts))
         sem = asyncio.Semaphore(CONCURRENT)
 
         async with async_playwright() as p:
 
             async def run_batch(batch_accounts, allow_retry: bool, count_for_state: bool):
+                nonlocal processed_total
                 retry_accounts = []
 
                 async def worker(acc):
                     uid = acc.get("uid")
                     if STOP_EVENT.is_set():
-                        current_total = progress_state["processed_total"]
-                        logger.info("[%s] ⏹ Остановка. Сохраняем позицию %d", uid, start_index + current_total)
-                        save_farm_state(start_index + current_total)
+                        logger.info("[%s] ⏹ Остановка. Сохраняем позицию %d", uid, start_index + processed_total)
+                        save_farm_state(start_index + processed_total)
                         return
                     async with sem:
                         if STOP_EVENT.is_set():
@@ -860,8 +860,8 @@ async def main():
                             logger.error(f"[{uid}] ❌ Ошибка: {e}")
                         finally:
                             if count_for_state:
-                                progress_state["processed_total"] += 1
-                                save_farm_state(start_index + progress_state["processed_total"])
+                                processed_total += 1
+                                save_farm_state(start_index + processed_total)
 
                 tasks = [asyncio.create_task(worker(acc)) for acc in batch_accounts]
 
