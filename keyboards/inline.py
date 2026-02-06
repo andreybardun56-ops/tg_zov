@@ -1,22 +1,25 @@
 # tg_zov/keyboards/inline.py
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram import Bot
+from aiogram import Router, F, types, Bot
+router = Router()
 
+from aiogram import Bot
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # ============================ ♻️ ОБМЕН ПАЗЛОВ ============================
 
 # --- Конфигурация предметов обмена ---
 EXCHANGE_ITEMS = {
     "37305": ("📚 20 книг опыта", 20, 1, "https://img1.igg.com/1030/res/2017/07/16/211400_9899.png"),
-    "37306": ("💎 2 самоцвета", 2, 1, "https://img1.igg.com/1030/res/2020/12/09/213600_9572.png"),
-    "37307": ("🪙 20 рун", 20, 1, "https://img1.igg.com/1030/res/2019/10/23/031136_2131.png"),
-    "37309": ("🧱 10 сундуков", 10, 2, "https://img1.igg.com/1030/res/2019/06/20/050839_6991.png"),
-    "37310": ("🎟️ 4 пропуска", 4, 2, "https://img1.igg.com/1030/res/2019/02/25/032732_3374.png"),
-    "37311": ("⚙️ 4 механизма", 4, 2, "https://img1.igg.com/1030/res/2018/12/20/043132_5843.png"),
-    "37312": ("🧩 4 редких пазла", 4, 5, "https://img1.igg.com/game/1030/res/2022/07/15/003556_62d0fcbc8315f2236.png"),
-    "37313": ("🎁 4 премиум-награды", 4, 5, "https://img1.igg.com/game/1030/res/2022/07/15/003537_62d0fca95492c1184.png"),
-    "43382": ("🏆 4 эпических предмета", 4, 5, "https://img1.igg.com/game/1030/res/2022/07/15/003634_62d0fce2c9e2e2635.png"),
+    "37306": ("💎 2 мешка выбора ресурсов I", 2, 1, "https://img1.igg.com/1030/res/2020/12/09/213600_9572.png"),
+    "37307": ("🪙 20 сундуков облика зданий I", 20, 1, "https://img1.igg.com/1030/res/2019/10/23/031136_2131.png"),
+    "37309": ("🧱 10 пыльцы", 10, 2, "https://img1.igg.com/1030/res/2019/06/20/050839_6991.png"),
+    "37310": ("🎟️ 4 сундука VI", 4, 2, "https://img1.igg.com/1030/res/2019/02/25/032732_3374.png"),
+    "37311": ("⚙️ 4 сундука V", 4, 2, "https://img1.igg.com/1030/res/2018/12/20/043132_5843.png"),
+    "37312": ("🧩 4 мешок выбора осколков эпич. героя III", 4, 5, "https://img1.igg.com/game/1030/res/2022/07/15/003556_62d0fcbc8315f2236.png"),
+    "37313": ("🎁 4 мешок выбора рудиментов эпич. героев III", 4, 5, "https://img1.igg.com/game/1030/res/2022/07/15/003537_62d0fca95492c1184.png"),
+    "43382": ("🏆 4 мешок выбора обликов эпич. героя III", 4, 5, "https://img1.igg.com/game/1030/res/2022/07/15/003634_62d0fce2c9e2e2635.png"),
 }
 
 async def send_exchange_items(bot: Bot, user_id: int, uid: str):
@@ -49,12 +52,14 @@ async def send_exchange_items(bot: Bot, user_id: int, uid: str):
                 parse_mode="HTML"
             )
         except Exception as e:
+            # fallback на текстовое сообщение, если фото не загрузилось
             await bot.send_message(
                 chat_id=user_id,
                 text=f"{caption}\n\n⚠️ <i>Не удалось загрузить изображение: {e}</i>",
                 reply_markup=kb,
                 parse_mode="HTML"
             )
+
 # ============================ 🧩 ПАЗЛЫ ============================
 
 def get_puzzle_accounts_kb(accounts: list, is_admin: bool = False) -> InlineKeyboardMarkup:
@@ -67,7 +72,6 @@ def get_puzzle_accounts_kb(accounts: list, is_admin: bool = False) -> InlineKeyb
         username = acc.get("username", "Без имени")
         kb.button(text=f"{uid} | {username}", callback_data=f"puzzle_acc:{uid}")
 
-    if is_admin:
         kb.button(text="🎁 Получить 30 пазлов", callback_data="get_30_puzzles")
 
     kb.adjust(1)
