@@ -35,6 +35,29 @@ def load_cookies_for_account(user_id: str, uid: str) -> dict:
         return {}
 
 
+def load_first_account_cookies(exclude: set[str] | None = None) -> dict:
+    if exclude is None:
+        exclude = set()
+    if not os.path.exists(COOKIES_FILE):
+        logger.warning("[COOKIES] ⚠️ Файл cookies.json не найден")
+        return {}
+    try:
+        with open(COOKIES_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict) or not data:
+            return {}
+        first_user = next(iter(data.values()))
+        if not isinstance(first_user, dict) or not first_user:
+            return {}
+        first_uid = next(iter(first_user.values()))
+        if not isinstance(first_uid, dict):
+            return {}
+        return {k: v for k, v in first_uid.items() if k not in exclude and v}
+    except Exception as e:
+        logger.error(f"[COOKIES] ❌ Ошибка загрузки cookies первого аккаунта: {e}")
+        return {}
+
+
 def jwt_get_uid(token: str) -> str | None:
     try:
         parts = token.split(".")
@@ -149,6 +172,17 @@ async def _select_login_tab(page, mode: str) -> None:
             continue
 
 
+async def _is_access_denied(page) -> bool:
+    try:
+        if await page.locator("text=Access Denied").count() > 0:
+            return True
+        if await page.locator("text=You don't have permission to access").count() > 0:
+            return True
+    except Exception:
+        return False
+    return False
+
+
 async def _fill_first_input(page, selectors: list[str], value: str) -> bool:
     for selector in selectors:
         try:
@@ -186,12 +220,14 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
     Авторизация на https://castleclash.igg.com/shop/ через email+пароль.
     Возвращает cookies и uid (если найден).
     """
-    ctx = None
+    browser = None
+    context = None
     page = None
     try:
         from playwright.async_api import async_playwright
         async with async_playwright() as p:
             profile = get_random_browser_profile()
+            logger.info("[SHOP] ▶ Запуск браузера для входа по email")
             browser = await p.chromium.launch(headless=True, slow_mo=30)
             context = await browser.new_context(
                 viewport=profile["viewport"],
@@ -212,7 +248,30 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
             except Exception:
                 pass
 
+            logger.info("[SHOP] 🔧 Применяем bootstrap cookies (без gpc_sso_token)")
+            bootstrap_cookies = load_first_account_cookies(exclude={"gpc_sso_token"})
+            if bootstrap_cookies:
+                try:
+                    await context.add_cookies(
+                        [
+                            {"name": name, "value": value, "url": "https://castleclash.igg.com"}
+                            for name, value in bootstrap_cookies.items()
+                        ]
+                    )
+                    logger.info("[SHOP] 🍪 Bootstrap cookies добавлены: %s", len(bootstrap_cookies))
+                except Exception as e:
+                    logger.warning(f"[COOKIES] ⚠️ Не удалось установить cookies первого аккаунта: {e}")
+            else:
+                logger.info("[SHOP] 🍪 Bootstrap cookies не найдены или пустые")
+
+            logger.info("[SHOP] 🌍 Открываем страницу магазина")
             await page.goto("https://castleclash.igg.com/shop/", wait_until="domcontentloaded", timeout=60000)
+            if await _is_access_denied(page):
+                await _capture_login_error_screenshot(page, "access_denied")
+                return {
+                    "success": False,
+                    "error": "Access Denied при открытии страницы (возможна блокировка по IP).",
+                }
             await _accept_cookies(page)
 
             if not await _open_login_modal(page):
@@ -222,6 +281,7 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
             await _accept_cookies(page)
             await _select_login_tab(page, "email")
 
+            logger.info("[SHOP] ✉️ Вводим email")
             filled_email = await _fill_first_input(
                 page,
                 [
@@ -241,6 +301,7 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                 await _capture_login_error_screenshot(page, "email_not_found")
                 return {"success": False, "error": "Не найдено поле для email."}
 
+            logger.info("[SHOP] 🔒 Вводим пароль")
             filled_pass = await _fill_first_input(
                 page,
                 [
@@ -258,6 +319,7 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                 await _capture_login_error_screenshot(page, "password_not_found")
                 return {"success": False, "error": "Не найдено поле для пароля."}
 
+            logger.info("[SHOP] ✅ Нажимаем кнопку входа")
             login_btn = page.locator(
                 ".passport--form-ipt-btns a.passport--passport-common-btn.passport--yellow"
             )
@@ -272,6 +334,7 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
 
             await page.wait_for_timeout(4000)
 
+            logger.info("[SHOP] 🔎 Проверяем cookies после входа")
             cookies_list = await context.cookies()
             cookies_result = {c["name"]: c["value"] for c in cookies_list}
             token = cookies_result.get("gpc_sso_token")
@@ -280,6 +343,7 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                 await _capture_login_error_screenshot(page, "uid_not_found")
                 return {"success": False, "error": "Не удалось получить IGG ID после входа."}
 
+            logger.info("[SHOP] ✅ Вход успешен, UID=%s", uid)
             return {"success": True, "uid": uid, "cookies": cookies_result, "username": "Игрок"}
     except Exception as e:
         await _capture_login_error_screenshot(page, "exception")
@@ -308,6 +372,7 @@ async def start_shop_login_igg(igg_id: str) -> dict[str, Any]:
         from playwright.async_api import async_playwright
         playwright = await async_playwright().start()
         profile = get_random_browser_profile()
+        logger.info("[SHOP] ▶ Запуск браузера для входа по IGG ID")
         ctx = await launch_masked_persistent_context(
             playwright,
             user_data_dir=f"data/chrome_profiles/_shop_igg_{igg_id}",
@@ -318,7 +383,11 @@ async def start_shop_login_igg(igg_id: str) -> dict[str, Any]:
         context = ctx["context"]
         page = ctx["page"]
 
+        logger.info("[SHOP] 🌍 Открываем страницу магазина (IGG ID)")
         await page.goto("https://castleclash.igg.com/shop/", wait_until="domcontentloaded", timeout=60000)
+        if await _is_access_denied(page):
+            await _capture_login_error_screenshot(page, "access_denied")
+            return {"success": False, "error": "Access Denied при открытии страницы (возможна блокировка по IP)."}
         await _accept_cookies(page)
 
         if not await _open_login_modal(page):
@@ -326,6 +395,7 @@ async def start_shop_login_igg(igg_id: str) -> dict[str, Any]:
 
         await _select_login_tab(page, "igg")
 
+        logger.info("[SHOP] 🆔 Вводим IGG ID")
         filled = await _fill_first_input(
             page,
             [
@@ -338,6 +408,7 @@ async def start_shop_login_igg(igg_id: str) -> dict[str, Any]:
         if not filled:
             return {"success": False, "error": "Не найдено поле для IGG ID."}
 
+        logger.info("[SHOP] 📩 Нажимаем «Получить код»")
         code_btn = page.locator("button.passport--sub-btn:has-text('Получить код')")
         if await code_btn.count() > 0:
             await code_btn.first.click(timeout=5000)
