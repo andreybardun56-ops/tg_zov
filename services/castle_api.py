@@ -182,8 +182,13 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                 page,
                 [
                     'input[type="email"]',
+                    'input.passport--email-ipt',
+                    '.passport--email-item input.passport--email-ipt',
+                    '.passport--email-item input.passport--form-ipt',
                     'input[placeholder*="E-mail"]',
                     'input[placeholder*="Email"]',
+                    'input[placeholder*="Почта"]',
+                    'input[placeholder*="имя пользователя"]',
                     'input.passport--form-ipt',
                 ],
                 email,
@@ -196,6 +201,9 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                 [
                     'input[type="password"]',
                     'input.passport--password-ipt',
+                    '.passport--email-item input.passport--password-ipt',
+                    '.passport--email-item input[type="password"]',
+                    'input[placeholder*="текущий пароль"]',
                     'input[placeholder*="Пароль"]',
                     'input[placeholder*="Password"]',
                 ],
@@ -204,7 +212,13 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
             if not filled_pass:
                 return {"success": False, "error": "Не найдено поле для пароля."}
 
-            login_btn = page.locator("a.passport--passport-common-btn.passport--yellow")
+            login_btn = page.locator(
+                ".passport--form-ipt-btns a.passport--passport-common-btn.passport--yellow"
+            )
+            if await login_btn.count() == 0:
+                login_btn = page.locator(
+                    "a.passport--passport-common-btn.passport--yellow:has-text('Вход')"
+                )
             if await login_btn.count() > 0:
                 await login_btn.first.click(timeout=5000)
             else:
