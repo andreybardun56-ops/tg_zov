@@ -145,11 +145,31 @@ async def process_account(p, user_id: str, uid: str, cookies: dict, send_callbac
 
 
 # ───────────────────────── main ─────────────────────────
-async def run_lucky_wheel(send_callback: Optional[Callable] = None):
+async def run_lucky_wheel(user_id: Optional[str] = None, uid: Optional[str] = None, send_callback: Optional[Callable] = None):
     """
-    Главная функция автосбора.
-    send_callback(uid, text) — функция для отправки сообщений в Telegram.
+    Универсальный запуск:
+    - если переданы user_id и uid → обрабатывается только один аккаунт (для event_manager)
+    - если не переданы → обрабатываются все аккаунты (для кнопки вручную)
     """
+    cookies_db = load_all_cookies()
+
+    # 🔹 режим одиночного аккаунта
+    if user_id and uid:
+        cookies = cookies_db.get(str(user_id), {}).get(str(uid))
+        if not cookies:
+            msg = f"⚠️ Не найдены cookies для {uid}"
+            logger.warning(msg)
+            if send_callback:
+                await send_callback(uid, msg)
+            return
+
+        async with async_playwright() as p:
+            await process_account(p, user_id, uid, cookies, send_callback)
+        if send_callback:
+            await send_callback(uid, "✅ Колесо фортуны завершено.")
+        return
+
+    # 🔹 режим массового автозапуска (без параметров)
     accounts = pick_all_accounts_from_cookies()
     if not accounts:
         logger.warning("⚠️ Нет аккаунтов для обработки (cookies.json пустой)")

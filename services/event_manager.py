@@ -109,7 +109,8 @@ async def run_full_event_cycle(bot=None, manual=False):
     # 2️⃣ Только если файл старый — обновляем статусы
     if need_refresh:
         logger.info("🔍 Проверяю и обновляю event_status.json через event_checker...")
-        await check_all_events(bot=bot)
+        admin_id = ADMIN_IDS[0] if ADMIN_IDS else None
+        await check_all_events(bot=bot, admin_id=admin_id)
 
     # 3️⃣ Загружаем актуальные данные
     event_status = {}
@@ -244,7 +245,7 @@ async def schedule_daily_events(bot):
 
     while True:
         now_local = datetime.now(LOCAL_TZ)
-        next_run_local = now_local.replace(hour=14, minute=36, second=0, microsecond=0)
+        next_run_local = now_local.replace(hour=10, minute=2, second=0, microsecond=0)
         if next_run_local <= now_local:
             next_run_local += timedelta(days=1)
 

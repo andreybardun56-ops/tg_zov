@@ -7,4 +7,6 @@ __all__ = [
     "logger",
     "event_manager",
     "puzzle_claim",
+    "puzzle_claim_auto2",
+    "cookies_io"
 ]

@@ -12,6 +12,30 @@ LOTTERY_URL = f"{BASE_URL}ajax.req.php?action=lottery"
 
 logger = logging.getLogger("castle_machine")
 
+from datetime import datetime
+from pathlib import Path
+
+RESULTS_FILE = Path("data/event_logs/castle_machine_results.json")
+RESULTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+
+def save_result_record(entry: dict):
+    """Сохраняет результат выполнения в общий лог JSON."""
+    try:
+        if RESULTS_FILE.exists():
+            with open(RESULTS_FILE, "r", encoding="utf-8") as f:
+                all_data = json.load(f)
+        else:
+            all_data = []
+
+        all_data.append(entry)
+        # ограничим лог 500 последними записями
+        all_data = all_data[-500:]
+
+        with open(RESULTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(all_data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.warning(f"[CASTLE_MACHINE] ⚠️ Не удалось записать результат в лог: {e}")
 
 def format_rewards(data: dict) -> str:
     """🧩 Форматирует список наград из JSON-ответа"""
@@ -121,22 +145,60 @@ async def run_castle_machine(user_id: str, uid: str = None) -> dict:
 
         logger.info(f"[CASTLE_MACHINE] ▶ Отправляю запрос {action_name} для {uid}")
 
-        # === Выполняем fetch ===
+        # === Лог сетевых запросов ===
+        page.on("request", lambda req: logger.info(f"🌍 REQUEST → {req.method} {req.url}"))
+        page.on("response", lambda res: logger.info(f"📩 RESPONSE ← {res.status} {res.url}"))
+
+        logger.info(f"[CASTLE_MACHINE] ▶ Отправляю запрос {action_name} для {uid}")
+
+        # === Лог сетевых запросов ===
+        page.on("request", lambda req: logger.info(f"🌍 REQUEST → {req.method} {req.url}"))
+        page.on("response", lambda res: logger.info(f"📩 RESPONSE ← {res.status} {res.url}"))
+
+        # === Выполняем fetch с полными заголовками и fallback через XHR ===
         try:
-            resp = await page.evaluate(
-                f"""
+            resp = await page.evaluate(f"""
                 async () => {{
-                    const res = await fetch("{action_url}", {{
-                        method: "GET",
-                        credentials: "include",
-                        headers: {{ "X-Requested-With": "XMLHttpRequest" }}
-                    }});
-                    return await res.text();
+                    // Основной запрос через fetch
+                    let res;
+                    try {{
+                        const r = await fetch("{action_url}", {{
+                            method: "GET",
+                            credentials: "include",
+                            headers: {{
+                                "X-Requested-With": "XMLHttpRequest",
+                                "Referer": "{BASE_URL}",
+                                "Accept": "application/json, text/javascript, */*; q=0.01",
+                                "User-Agent": navigator.userAgent
+                            }}
+                        }});
+                        res = await r.text();
+                    }} catch (e) {{
+                        res = "fetch_error:" + e;
+                    }}
+
+                    // Если fetch вернул пусто — fallback на XHR
+                    if (!res) {{
+                        const xhrResp = await new Promise((resolve) => {{
+                            const xhr = new XMLHttpRequest();
+                            xhr.open("GET", "{action_url}", true);
+                            xhr.withCredentials = true;
+                            xhr.setRequestHeader("X-Requested-With", "XMLHttpRequest");
+                            xhr.setRequestHeader("Referer", "{BASE_URL}");
+                            xhr.onload = () => resolve(xhr.responseText);
+                            xhr.onerror = () => resolve("XHR error");
+                            xhr.send();
+                        }});
+                        res = xhrResp;
+                    }}
+                    return res;
                 }}
-                """
-            )
+            """)
         except Exception as e:
             return {"success": False, "message": f"❌ Ошибка при запросе {action_name}: {e}"}
+
+        # Логируем первые 500 символов ответа (для диагностики)
+        logger.debug(f"[CASTLE_MACHINE] Raw response: {resp[:500]!r}")
 
         if not resp:
             return {"success": False, "message": f"⚠️ Пустой ответ {action_name} ({username})."}
@@ -147,11 +209,26 @@ async def run_castle_machine(user_id: str, uid: str = None) -> dict:
         except Exception:
             data = None
 
-        # ✅ Успех
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # ✅ Успешный результат
         if data and str(data.get("status")) == "1":
             msg = data.get("msg") or "Награда успешно получена!"
             rewards_text = format_rewards(data)
             logger.info(f"[CASTLE_MACHINE] ✅ Получена награда {action_name} для {uid}")
+
+            # 💾 Сохраняем результат
+            save_result_record({
+                "timestamp": timestamp,
+                "user_id": user_id,
+                "uid": uid,
+                "username": username,
+                "phase": phase,
+                "action": action_name,
+                "success": True,
+                "raw": data,
+            })
+
             return {
                 "success": True,
                 "message": (
@@ -163,6 +240,18 @@ async def run_castle_machine(user_id: str, uid: str = None) -> dict:
         # ⚠️ Ошибка: пропущен первый сегмент
         if data and data.get("error") == -3000 and data.get("status") == 0:
             logger.warning(f"[CASTLE_MACHINE] ⚠️ {username} ({uid}) — пропущен первый сегмент события!")
+
+            save_result_record({
+                "timestamp": timestamp,
+                "user_id": user_id,
+                "uid": uid,
+                "username": username,
+                "phase": phase,
+                "action": action_name,
+                "success": False,
+                "raw": data,
+            })
+
             return {
                 "success": True,
                 "message": (
@@ -175,6 +264,18 @@ async def run_castle_machine(user_id: str, uid: str = None) -> dict:
         # ❓ Неизвестный ответ
         snippet = str(resp).strip().replace("\n", " ")[:200]
         logger.warning(f"[CASTLE_MACHINE] ⚠️ Неизвестный ответ от сервера: {snippet}")
+
+        save_result_record({
+            "timestamp": timestamp,
+            "user_id": user_id,
+            "uid": uid,
+            "username": username,
+            "phase": phase,
+            "action": action_name,
+            "success": False,
+            "raw": snippet,
+        })
+
         return {
             "success": False,
             "message": f"⚠️ <b>{username}</b> ({uid}) — неизвестный ответ:\n<code>{snippet}</code>"

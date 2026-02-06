@@ -25,7 +25,7 @@ for path in (DATA_DIR, PROFILE_DIR, LOGS_DIR):
 LOG_FILE = LOGS_DIR / "login_refresh.log"
 WORKER_ID = 1
 
-CONCURRENT = 5 #Сколько аккаунтов обрабатывается одновременно
+CONCURRENT = 8 #Сколько аккаунтов обрабатывается одновременно
 DELAY_AFTER_SUCCESS = 1 #Задержка (в секундах) после успешного логина
 NAV_TIMEOUT = 30000 #Таймаут загрузки страницы
 WAIT_AFTER_LOGIN = 5 #Время ожидания после нажатия кнопки «Войти»

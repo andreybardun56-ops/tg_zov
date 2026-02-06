@@ -79,25 +79,24 @@ async def run_dragon_quest(user_id: str, uid: str = None) -> dict:
     logger.info(f"[DRAGON_QUEST] 🍪 Cookies загружены для {username} ({uid}) — {len(cookies_dict)} шт.")
 
     async def handler(page):
-        html = (await page.content()).lower()
-        if any(x in html for x in ["событие еще не началось", "уже завершилось"]):
-            return {
-                "success": True,
-                "status": "ended",
-                "message": f"⚠️ {username} ({uid}) — событие ещё не началось или завершилось."
-            }
 
+        # --- Проверка активности через event_checker ---
         try:
             from services.event_checker import check_event_active
             active = await check_event_active("dragon_quest")
             if not active:
-                logger.warning(f"[DRAGON_QUEST] ⚠️ Акция неактивна по данным event_checker.")
-                return {"success": True, "status": "ended", "message": f"⚠️ {username} ({uid}) — акция не активна."}
+                logger.warning(f"[DRAGON_QUEST] ⚠️ Акция не активна (event_checker).")
+                return {
+                    "success": False,
+                    "status": "ended",
+                    "message": f"⚠️ {username} ({uid}) — акция не активна."
+                }
         except Exception as e:
-            logger.warning(f"[DRAGON_QUEST] ⚠️ Ошибка при проверке активности: {e}")
+            logger.warning(f"[DRAGON_QUEST] ⚠️ Ошибка проверки активности: {e}")
 
-        # --- Основной запрос ---
+        # --- Основной attack запрос ---
         logger.info(f"[DRAGON_QUEST] ⚔️ Отправляю запрос attack для {uid}")
+
         try:
             resp = await page.evaluate(
                 f"""
@@ -122,36 +121,38 @@ async def run_dragon_quest(user_id: str, uid: str = None) -> dict:
         except Exception:
             data = None
 
-        # ⚙️ Попытки закончились
+        # --- Попытки закончились ---
         if (
-                data == {"data": [], "error": 1, "status": 0}
-                or data == {"data": [], "error": 403, "status": 0}
-                or "попытки" in str(resp).lower()
+            data == {"data": [], "error": 1, "status": 0}
+            or data == {"data": [], "error": 403, "status": 0}
+            or "попытки" in str(resp).lower()
         ):
             logger.info(f"[DRAGON_QUEST] ⚙️ Для {uid} — попытки закончились.")
             return {
-                "success": False,  # ❗️ теперь не True, чтобы кнопка не считала это «успешно»
+                "success": False,
                 "status": "ended",
-                "message": f"⚙️ <b>{username}</b> ({uid}) — попытки в событии закончились."
+                "message": f"⚙️ <b>{username}</b> ({uid}) — попытки закончились."
             }
 
-        # ✅ Успех
+        # --- Успешная атака ---
         if data and str(data.get("status")) == "1":
             msg = data.get("msg") or "Атака выполнена успешно!"
             rewards_text = format_rewards(data)
+
             logger.info(f"[DRAGON_QUEST] ✅ Успешная атака для {uid}")
             return {
                 "success": True,
                 "status": "done",
                 "message": (
                     f"⚔️ <b>{username}</b> ({uid}) — акция <b>Рыцари Драконы</b>\n\n"
-                    f"{msg}{rewards_text}\n\n✅ Проверка завершена!"
+                    f"{msg}{rewards_text}\n\n"
+                    f"✅ Проверка завершена!"
                 )
             }
 
-        # ❌ Неизвестный ответ
+        # --- Неизвестный ответ ---
         snippet = str(resp).strip().replace("\n", " ")[:200]
-        logger.warning(f"[DRAGON_QUEST] ⚠️ Неизвестный ответ от сервера: {snippet}")
+        logger.warning(f"[DRAGON_QUEST] ⚠️ Неизвестный ответ сервера: {snippet}")
         return {
             "success": False,
             "status": "error",
