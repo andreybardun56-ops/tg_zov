@@ -5,6 +5,7 @@ import re
 import json
 import os
 import base64
+from datetime import datetime
 from typing import Any
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 from services.logger import logger
@@ -150,12 +151,33 @@ async def _fill_first_input(page, selectors: list[str], value: str) -> bool:
     return False
 
 
+async def _capture_login_error_screenshot(page, tag: str) -> str | None:
+    if not page:
+        return None
+    try:
+        screenshots_dir = os.path.join("logs", "screenshots", f"{datetime.now():%Y-%m-%d}")
+        os.makedirs(screenshots_dir, exist_ok=True)
+        safe_tag = re.sub(r"[^a-zA-Z0-9_-]+", "_", tag).strip("_")[:40] or "error"
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        screenshot_path = os.path.join(
+            screenshots_dir,
+            f"passport_login_{safe_tag}_{ts}.png",
+        )
+        await page.screenshot(path=screenshot_path)
+        logger.info(f"[SHOP] 📸 Скриншот ошибки: {screenshot_path}")
+        return screenshot_path
+    except Exception as se:
+        logger.warning(f"[SHOP] ⚠️ Не удалось сделать скриншот ошибки: {se}")
+        return None
+
+
 async def login_shop_email(email: str, password: str) -> dict[str, Any]:
     """
     Авторизация на https://castleclash.igg.com/shop/ через email+пароль.
     Возвращает cookies и uid (если найден).
     """
     ctx = None
+    page = None
     try:
         from playwright.async_api import async_playwright
         async with async_playwright() as p:
@@ -174,6 +196,7 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
             await _accept_cookies(page)
 
             if not await _open_login_modal(page):
+                await _capture_login_error_screenshot(page, "open_login_modal")
                 return {"success": False, "error": "Не удалось открыть окно авторизации."}
 
             await _select_login_tab(page, "email")
@@ -182,13 +205,19 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                 page,
                 [
                     'input[type="email"]',
+                    'input.passport--email-ipt',
+                    '.passport--email-item input.passport--email-ipt',
+                    '.passport--email-item input.passport--form-ipt',
                     'input[placeholder*="E-mail"]',
                     'input[placeholder*="Email"]',
+                    'input[placeholder*="Почта"]',
+                    'input[placeholder*="имя пользователя"]',
                     'input.passport--form-ipt',
                 ],
                 email,
             )
             if not filled_email:
+                await _capture_login_error_screenshot(page, "email_not_found")
                 return {"success": False, "error": "Не найдено поле для email."}
 
             filled_pass = await _fill_first_input(
@@ -196,15 +225,25 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                 [
                     'input[type="password"]',
                     'input.passport--password-ipt',
+                    '.passport--email-item input.passport--password-ipt',
+                    '.passport--email-item input[type="password"]',
+                    'input[placeholder*="текущий пароль"]',
                     'input[placeholder*="Пароль"]',
                     'input[placeholder*="Password"]',
                 ],
                 password,
             )
             if not filled_pass:
+                await _capture_login_error_screenshot(page, "password_not_found")
                 return {"success": False, "error": "Не найдено поле для пароля."}
 
-            login_btn = page.locator("a.passport--passport-common-btn.passport--yellow")
+            login_btn = page.locator(
+                ".passport--form-ipt-btns a.passport--passport-common-btn.passport--yellow"
+            )
+            if await login_btn.count() == 0:
+                login_btn = page.locator(
+                    "a.passport--passport-common-btn.passport--yellow:has-text('Вход')"
+                )
             if await login_btn.count() > 0:
                 await login_btn.first.click(timeout=5000)
             else:
@@ -217,10 +256,12 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
             token = cookies_result.get("gpc_sso_token")
             uid = jwt_get_uid(token) if token else None
             if not uid:
+                await _capture_login_error_screenshot(page, "uid_not_found")
                 return {"success": False, "error": "Не удалось получить IGG ID после входа."}
 
             return {"success": True, "uid": uid, "cookies": cookies_result, "username": "Игрок"}
     except Exception as e:
+        await _capture_login_error_screenshot(page, "exception")
         logger.exception(f"[SHOP] ❌ Ошибка при входе по email: {e}")
         return {"success": False, "error": str(e)}
     finally:
