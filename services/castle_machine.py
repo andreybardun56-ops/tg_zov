@@ -61,7 +61,7 @@ def format_rewards(data: dict) -> str:
     return "\n🎁 " + "\n🎁 ".join(rewards)
 
 
-async def run_castle_machine(user_id: str, uid: str = None) -> dict:
+async def run_castle_machine(user_id: str, uid: str = None, context=None) -> dict:
     logger.info(f"[CASTLE_MACHINE] ▶ Запуск для user_id={user_id}, uid={uid}")
 
     """
@@ -281,4 +281,4 @@ async def run_castle_machine(user_id: str, uid: str = None) -> dict:
             "message": f"⚠️ <b>{username}</b> ({uid}) — неизвестный ответ:\n<code>{snippet}</code>"
         }
 
-    return await run_event_with_browser(user_id, uid, BASE_URL, "Создающая машина", handler)
+    return await run_event_with_browser(user_id, uid, BASE_URL, "Создающая машина", handler, context=context)

@@ -92,7 +92,7 @@ async def hash_image(session: aiohttp.ClientSession, url: str, retries: int = 3)
     return None
 
 # === Этап 1: поиск пар ===
-async def find_flop_pairs(user_id: str, uid: str = None):
+async def find_flop_pairs(user_id: str, uid: str = None, context=None):
     accounts = get_all_accounts(user_id)
     if not accounts:
         return {"success": False, "message": "⚠️ У пользователя нет аккаунтов."}
@@ -165,10 +165,10 @@ async def find_flop_pairs(user_id: str, uid: str = None):
             msg.append(f"...и ещё {len(pairs) - 10} пар.")
         return {"success": True, "message": "\n".join(msg)}
 
-    return await run_event_with_browser(user_id, uid, BASE_URL, "Найди пару (сканирование)", handler)
+    return await run_event_with_browser(user_id, uid, BASE_URL, "Найди пару (сканирование)", handler, context=context)
 
 # === Этап 2: открытие ===
-async def run_flop_pair(user_id: str, uid: str = None):
+async def run_flop_pair(user_id: str, uid: str = None, context=None):
     """
     Ежедневное открытие пар. Пропускает уже открытые пары.
     """
@@ -251,4 +251,4 @@ async def run_flop_pair(user_id: str, uid: str = None):
         summary.append("✅ Ежедневное открытие завершено!")
         return {"success": True, "message": "\n".join(summary)}
 
-    return await run_event_with_browser(user_id, uid, BASE_URL, "Найди пару", handler)
+    return await run_event_with_browser(user_id, uid, BASE_URL, "Найди пару", handler, context=context)

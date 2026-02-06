@@ -72,9 +72,9 @@ from playwright.async_api import async_playwright
 # === Папки и файлы ===
 DATA_DIR = Path("data/data_akk")
 LOG_DIR = Path("data/logs")
-SCREEN_DIR = Path("data/screenshots")
-DATA_FILE = Path("data/puzzle_data.jsonl")
-FAIL_DIR = Path("data/failures")
+SCREEN_DIR = Path("data/screenshots_dupes")
+DATA_FILE = Path("data/puzzle_duplicates_data.jsonl")
+FAIL_DIR = Path("data/failures_dupes")
 
 # === Настройки ===
 CONCURRENT = 4  # количество аккаов
@@ -85,6 +85,7 @@ DELAY_BETWEEN_LOTTERY = 1.5    #Промежуток между запросам
 
 # === Настройки батчей ===
 BATCH_SIZE = 20  # после этого числа аккаунтов данные будут сохраняться
+BATCH_RETRY_SIZE = 100  # батч для повторной обработки 403
 puzzle_batch: List[dict] = []  # буфер для новых данных
 processed_count = 0           # счётчик обработанных аккаунтов
 puzzle_lock = asyncio.Lock()  # защита батчей при CONCURRENT > 1
@@ -96,7 +97,7 @@ HEADLESS = True
 # Если оставишь None — Playwright будет использовать свою сборку Chromium.
 # пример Windows: r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 # Базовая папка для persistent профилей (user_data_dir)
-PROFILE_BASE_DIR = Path("data/chrome_profiles")
+PROFILE_BASE_DIR = Path("data/chrome_profiles_dupes")
 PROFILE_BASE_DIR.mkdir(parents=True, exist_ok=True)
 # 🛠 Попытка автоматически исправить права на папку (Windows)
 try:
@@ -112,9 +113,9 @@ SLOW_MO = 50  # мс
 # === Логирование ===
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 FAIL_DIR.mkdir(parents=True, exist_ok=True)
-logger = logging.getLogger("puzzle2_auto")
+logger = logging.getLogger("puzzle3_auto")
 logger.setLevel(logging.INFO)
-file_handler = logging.FileHandler(LOG_DIR / "puzzle2_auto.log", encoding="utf-8", mode="w")
+file_handler = logging.FileHandler(LOG_DIR / "puzzle3_auto.log", encoding="utf-8", mode="w")
 file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S"))
 logger.handlers.clear()
 logger.addHandler(file_handler)
@@ -321,7 +322,7 @@ def calculate_puzzle_totals(file_path: Path, accounts_processed: int = None):
     else:
         logger.info(f"🔢 Аккаунтов с дубликатами: {count_accounts}")
 
-    summary_path = Path("data/puzzle_summary.json")
+    summary_path = Path("data/puzzle_duplicates_summary.json")
     with open(summary_path, "w", encoding="utf-8") as out:
         json.dump({
             "totals": totals,
@@ -333,7 +334,15 @@ def calculate_puzzle_totals(file_path: Path, accounts_processed: int = None):
     return totals
 
 # ---------------- per-account workflow ----------------
-async def process_account(account: Dict[str, Any], p) -> None:
+def is_403_response(status: int, text: str) -> bool:
+    if status == 403:
+        return True
+    if not text:
+        return False
+    return "403 FORBIDDEN" in text.upper()
+
+
+async def process_account(account: Dict[str, Any], p) -> bool:
     uid = account.get("uid")
     mail = account.get("mail", "?")
     cookies = account.get("cookies", {})
@@ -545,14 +554,20 @@ async def process_account(account: Dict[str, Any], p) -> None:
                     'Referer': 'https://event-eu-cc.igg.com/event/puzzle2/'
                 }}
             }});
-            return await res.text();
+            const txt = await res.text();
+            return {{status: res.status, text: txt}};
         }}
         """
-        text = await page.evaluate(js_code)
+        resp = await page.evaluate(js_code)
+        text = resp.get("text", "")
+        status = resp.get("status", 0)
+        if is_403_response(status, text):
+            logger.warning("[%s] 🚫 Получен 403 на get_resource, добавляем в повтор.", uid)
+            return True
 
         if not text.strip().startswith("{"):
             logger.error("[%s] ⚠️ get_resource: сервер вернул не JSON", uid)
-            return
+            return False
 
         # ✅ Парсим JSON
         data = json.loads(text)
@@ -658,6 +673,8 @@ async def process_account(account: Dict[str, Any], p) -> None:
         except Exception as e:
             logger.warning("[%s] ⚠️ Не удалось удалить профиль: %s", uid, e)
         await asyncio.sleep(jitter(DELAY_BETWEEN_ACCOUNTS, variance=0.6))
+
+    return False
 # ---------------- main ----------------
 async def main():
     clear_stop_request()
@@ -672,40 +689,57 @@ async def main():
 
     async with async_playwright() as p:
 
-        async def worker(acc):
-            uid = acc.get("uid")
-            if STOP_EVENT.is_set():
-                logger.info("[%s] ⏹ Пропуск аккаунта: получен сигнал остановки", uid)
-                return
-            async with sem:
+        async def run_batch(batch_accounts, allow_retry: bool):
+            retry_accounts = []
+
+            async def worker(acc):
+                uid = acc.get("uid")
                 if STOP_EVENT.is_set():
-                    logger.info("[%s] ⏹ Завершаем перед стартом обработки", uid)
+                    logger.info("[%s] ⏹ Пропуск аккаунта: получен сигнал остановки", uid)
                     return
-                try:
-                    await process_account(acc, p)
-                    stats["success"] += 1
-                except Exception as e:
-                    stats["fail"] += 1
-                    logger.error(f"[{acc.get('uid')}] ❌ Ошибка: {e}")
+                async with sem:
+                    if STOP_EVENT.is_set():
+                        logger.info("[%s] ⏹ Завершаем перед стартом обработки", uid)
+                        return
+                    try:
+                        needs_retry = await process_account(acc, p)
+                        if needs_retry:
+                            if allow_retry:
+                                retry_accounts.append(acc)
+                            else:
+                                stats["fail"] += 1
+                        else:
+                            stats["success"] += 1
+                    except Exception as e:
+                        stats["fail"] += 1
+                        logger.error(f"[{acc.get('uid')}] ❌ Ошибка: {e}")
 
-        tasks = [asyncio.create_task(worker(acc)) for acc in accounts]
-        try:
-            await tqdm_asyncio.gather(*tasks, desc="Обработка аккаунтов", total=len(tasks))
-            # Сохраняем остатки, которые не дотянули до BATCH_SIZE
-            async with puzzle_lock:
-                if puzzle_batch:
-                    logger.info(f"💾 Сохраняем остаток данных: {len(puzzle_batch)} аккаунтов")
-                    for e in puzzle_batch:
-                        save_puzzle_data(e, DATA_FILE)
-                    puzzle_batch.clear()
+            tasks = [asyncio.create_task(worker(acc)) for acc in batch_accounts]
+            try:
+                await tqdm_asyncio.gather(*tasks, desc="Обработка аккаунтов", total=len(tasks))
+            except asyncio.CancelledError:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
 
-                # Telegram-уведомление можно тоже вызвать здесь
+            return retry_accounts
 
-        except asyncio.CancelledError:
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            raise
+        for batch_start in range(0, len(accounts), BATCH_RETRY_SIZE):
+            if STOP_EVENT.is_set():
+                break
+            batch = accounts[batch_start:batch_start + BATCH_RETRY_SIZE]
+            retry_accounts = await run_batch(batch, allow_retry=True)
+            if retry_accounts and not STOP_EVENT.is_set():
+                await run_batch(retry_accounts, allow_retry=False)
+
+        # Сохраняем остатки, которые не дотянули до BATCH_SIZE
+        async with puzzle_lock:
+            if puzzle_batch:
+                logger.info(f"💾 Сохраняем остаток данных: {len(puzzle_batch)} аккаунтов")
+                for e in puzzle_batch:
+                    save_puzzle_data(e, DATA_FILE)
+                puzzle_batch.clear()
 
     if puzzle_batch:
         for e in puzzle_batch:
@@ -728,7 +762,7 @@ async def main():
 
 
 if __name__ == "__main__":
-    print("🚀 Запуск puzzle2_auto.py...")
+    print("🚀 Запуск puzzle3_auto.py...")
     try:
         asyncio.run(main())
     except KeyboardInterrupt:

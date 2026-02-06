@@ -433,7 +433,57 @@ def update_new_data_files_with_cookies(data_dir: Path, uid: str, cookie_dict: Di
 # ───────────────────────────────────────────────
 # 🧩 Универсальный запуск события
 # ───────────────────────────────────────────────
-async def run_event_with_browser(user_id: str, uid: str, event_url: str, event_name: str, handler_fn):
+async def run_event_with_existing_context(
+    user_id: str,
+    uid: str,
+    context,
+    event_url: str,
+    event_name: str,
+    handler_fn,
+):
+    """
+    Выполняет обработчик события в уже открытой сессии (context).
+    """
+    user_id, uid = str(user_id), str(uid)
+    cookies_db = load_all_cookies()
+
+    page = await context.new_page()
+    try:
+        await page.goto(event_url, wait_until="domcontentloaded", timeout=45_000)
+        await asyncio.sleep(2)
+        await humanize_pre_action(page)
+
+        result = await handler_fn(page)
+
+        fresh = await context.cookies()
+        fresh_map = {c["name"]: c["value"] for c in fresh if "name" in c}
+        cookies_db.setdefault(user_id, {})[uid] = fresh_map
+        save_all_cookies(cookies_db)
+        logger.info(f"[{event_name}] 🔄 Cookies обновлены для {uid}")
+
+        return {
+            "success": bool(result.get("success")),
+            "message": result.get("message", "❓ Нет сообщения"),
+            "event": event_name,
+        }
+    except Exception as e:
+        logger.exception(f"[{event_name}] ❌ Ошибка выполнения: {e}")
+        return {"success": False, "message": f"❌ Ошибка при выполнении {event_name}: {e}", "event": event_name}
+    finally:
+        try:
+            await page.close()
+        except Exception:
+            pass
+
+
+async def run_event_with_browser(
+    user_id: str,
+    uid: str,
+    event_url: str,
+    event_name: str,
+    handler_fn,
+    context=None,
+):
     """
     Унифицированный запуск браузера и передача страницы в обработчик.
     handler_fn(page) -> {"success": bool, "message": str}
@@ -442,6 +492,16 @@ async def run_event_with_browser(user_id: str, uid: str, event_url: str, event_n
     cookies_db = load_all_cookies()
     user_cookies = cookies_db.get(user_id, {})
     acc_cookies = user_cookies.get(uid, {})
+
+    if context is not None:
+        return await run_event_with_existing_context(
+            user_id,
+            uid,
+            context,
+            event_url,
+            event_name,
+            handler_fn,
+        )
 
     async with async_playwright() as p:
         profile = get_random_browser_profile()
