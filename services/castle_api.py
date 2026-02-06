@@ -186,8 +186,7 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
     Авторизация на https://castleclash.igg.com/shop/ через email+пароль.
     Возвращает cookies и uid (если найден).
     """
-    browser = None
-    context = None
+    ctx = None
     page = None
     try:
         from playwright.async_api import async_playwright
