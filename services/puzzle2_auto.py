@@ -832,7 +832,6 @@ async def main():
         async with async_playwright() as p:
 
             async def run_batch(batch_accounts, allow_retry: bool, count_for_state: bool):
-                nonlocal processed_total
                 retry_accounts = []
 
                 async def worker(acc):
