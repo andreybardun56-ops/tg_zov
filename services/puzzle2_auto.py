@@ -836,6 +836,7 @@ async def main():
                 retry_accounts = []
 
                 async def worker(acc):
+                    nonlocal processed_total
                     uid = acc.get("uid")
                     if STOP_EVENT.is_set():
                         logger.info("[%s] ⏹ Остановка. Сохраняем позицию %d", uid, start_index + processed_total)
