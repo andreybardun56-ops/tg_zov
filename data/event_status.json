@@ -1,10 +1,11 @@
 {
-  "puzzle2": false,
-  "flop_pair": false,
+  "puzzle2": true,
+  "flop_pair": true,
   "blind_box": false,
   "regress_10th": false,
   "thanksgiving_event": false,
   "castle_machine": false,
-  "lucky_wheel": false,
-  "dragon_quest": true
+  "lucky_wheel": true,
+  "dragon_quest": false,
+  "gas": false
 }
