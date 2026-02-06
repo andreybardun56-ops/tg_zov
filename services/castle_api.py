@@ -256,22 +256,6 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
             except Exception:
                 pass
 
-            logger.info("[SHOP] 🔧 Применяем bootstrap cookies (без gpc_sso_token)")
-            bootstrap_cookies = load_first_account_cookies(exclude={"gpc_sso_token"})
-            if bootstrap_cookies:
-                try:
-                    await context.add_cookies(
-                        [
-                            {"name": name, "value": value, "url": "https://castleclash.igg.com"}
-                            for name, value in bootstrap_cookies.items()
-                        ]
-                    )
-                    logger.info("[SHOP] 🍪 Bootstrap cookies добавлены: %s", len(bootstrap_cookies))
-                except Exception as e:
-                    logger.warning(f"[COOKIES] ⚠️ Не удалось установить cookies первого аккаунта: {e}")
-            else:
-                logger.info("[SHOP] 🍪 Bootstrap cookies не найдены или пустые")
-
             logger.info("[SHOP] 🌍 Открываем страницу магазина")
             await page.goto("https://castleclash.igg.com/shop/", wait_until="domcontentloaded", timeout=60000)
             if await _is_access_denied(page):
