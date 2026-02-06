@@ -7,9 +7,10 @@ import importlib.util
 import json
 import os
 import re
+import time
 from datetime import datetime
-from typing import Any
-from playwright.async_api import TimeoutError as PlaywrightTimeout
+from typing import Any, TypedDict
+from playwright.async_api import BrowserContext, Page, Playwright, TimeoutError as PlaywrightTimeout
 from services.logger import logger
 from services.browser_patches import (
     BROWSER_PATH,
@@ -24,6 +25,18 @@ from config import COOKIES_FILE
 # 🧱 Работа с cookies.json
 # ───────────────────────────────────────────────
 SLOW_MO = 50
+
+
+class ShopContext(TypedDict):
+    context: BrowserContext
+    page: Page
+
+
+class PlayerInfoResult(TypedDict):
+    success: bool
+    error: str | None
+    uid: str | None
+    username: str | None
 
 
 def _get_stealth_callable():
@@ -82,44 +95,99 @@ def jwt_get_uid(token: str) -> str | None:
         for key in ("sub", "uid", "userId", "user_id", "id", "jti"):
             if key in obj and obj[key]:
                 return str(obj[key])
-    except Exception:
+    except Exception as exc:
+        logger.debug("[SHOP] JWT decode failed: %s", exc)
         return None
     return None
 
 
-async def _accept_cookies(page) -> None:
-    try:
-        await page.wait_for_selector("div.i-cookie__btn[data-value=\"all\"]", timeout=3000)
-    except Exception:
-        pass
-    try:
-        if await page.locator("#onetrust-accept-btn-handler").count() > 0:
-            await page.click("#onetrust-accept-btn-handler", timeout=5000)
-            await asyncio.sleep(1.0)
-            return
-    except Exception:
-        pass
-
-    for selector in (
+async def _accept_cookies(page: Page) -> None:
+    selectors = [
+        "#onetrust-accept-btn-handler",
+        "div.i-cookie__btn[data-value=\"all\"]",
         "text=Accept all",
         "text=Accept All",
         "text=Принять все",
-        "div.i-cookie__btn[data-value=\"all\"]",
-    ):
+    ]
+    for selector in selectors:
+        locator = page.locator(selector)
         try:
-            if await page.locator(selector).count() > 0:
-                await page.click(selector, timeout=3000)
-                await asyncio.sleep(1.0)
-                return
-        except Exception:
+            if await locator.count() == 0:
+                continue
+            await locator.first.click(timeout=5000)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=5000)
+            except PlaywrightTimeout:
+                pass
+            return
+        except PlaywrightTimeout as exc:
+            logger.debug("[SHOP] Cookies banner click timeout (%s): %s", selector, exc)
+        except Exception as exc:
+            logger.debug("[SHOP] Cookies banner click failed (%s): %s", selector, exc)
+
+
+async def wait_shop_ready(page: Page, timeout: int = 60000) -> None:
+    deadline = time.monotonic() + (timeout / 1000)
+    def _remaining_ms() -> int:
+        return int(max(0, (deadline - time.monotonic()) * 1000))
+
+    try:
+        remaining_ms = min(15000, _remaining_ms())
+        if remaining_ms > 0:
+            await page.wait_for_load_state("domcontentloaded", timeout=remaining_ms)
+    except PlaywrightTimeout:
+        pass
+    except Exception as exc:
+        logger.debug("[SHOP] domcontentloaded wait failed: %s", exc)
+
+    try:
+        remaining_ms = min(15000, _remaining_ms())
+        if remaining_ms > 0:
+            await page.wait_for_load_state("networkidle", timeout=remaining_ms)
+    except PlaywrightTimeout:
+        pass
+    except Exception as exc:
+        logger.debug("[SHOP] networkidle wait failed: %s", exc)
+
+    url = (page.url or "").lower()
+    selectors = (
+        [
+            ".user__infos-item",
+            ".user__infos",
+        ]
+        if "mvp" in url
+        else [
+            "div.btn-login.login__btn.before-login:has-text('Авторизация')",
+            "div.userbar .btn-login.login__btn.before-login",
+            ".main .userbar .btn-login.login__btn.before-login",
+            ".passport--modal",
+            ".userbar",
+        ]
+    )
+
+    for selector in selectors:
+        remaining_ms = _remaining_ms()
+        if remaining_ms <= 0:
+            logger.warning("[SHOP] Page readiness timeout exceeded.")
+            raise PlaywrightTimeout("Shop readiness timeout exceeded.")
+        try:
+            await page.wait_for_selector(selector, state="visible", timeout=remaining_ms)
+            return
+        except PlaywrightTimeout:
             continue
+        except Exception as exc:
+            logger.debug("[SHOP] Wait selector failed (%s): %s", selector, exc)
+
+    logger.warning("[SHOP] No readiness selector appeared within timeout.")
+    raise PlaywrightTimeout("Shop readiness selector not found within timeout.")
 
 
-async def _open_login_modal(page) -> bool:
+async def _open_login_modal(page: Page) -> bool:
     selectors = [
         "div.btn-login.login__btn.before-login:has-text('Авторизация')",
         "div.userbar .btn-login.login__btn.before-login",
         ".main .userbar .btn-login.login__btn.before-login",
+        "text=Авторизация",
     ]
     for selector in selectors:
         try:
@@ -128,39 +196,15 @@ async def _open_login_modal(page) -> bool:
             await btn.scroll_into_view_if_needed()
             await btn.click(timeout=5000)
             return True
-        except Exception:
-            continue
-
-    for selector in selectors:
-        try:
-            clicked = await page.evaluate(
-                """
-                (sel) => {
-                    const el = document.querySelector(sel);
-                    if (!el) return false;
-                    el.click();
-                    return true;
-                }
-                """,
-                selector,
-            )
-            if clicked:
-                return True
-        except Exception:
-            continue
-
-    try:
-        btn = page.locator("text=Авторизация")
-        if await btn.count() > 0:
-            await btn.first.click(timeout=5000)
-            return True
-    except Exception:
-        pass
+        except PlaywrightTimeout as exc:
+            logger.debug("[SHOP] Login modal button timeout (%s): %s", selector, exc)
+        except Exception as exc:
+            logger.debug("[SHOP] Login modal button failed (%s): %s", selector, exc)
 
     return False
 
 
-async def _select_login_tab(page, mode: str) -> None:
+async def _select_login_tab(page: Page, mode: str) -> None:
     if mode == "email":
         selectors = [
             "a.email.passport--on:has-text('E-mail адрес')",
@@ -176,38 +220,43 @@ async def _select_login_tab(page, mode: str) -> None:
     for selector in selectors:
         try:
             el = page.locator(selector)
-            if await el.count() > 0:
-                await el.first.click(timeout=3000)
-                await asyncio.sleep(0.5)
-                return
-        except Exception:
-            continue
+            if await el.count() == 0:
+                continue
+            await el.first.click(timeout=3000)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=5000)
+            except PlaywrightTimeout:
+                pass
+            return
+        except Exception as exc:
+            logger.debug("[SHOP] Login tab switch failed (%s): %s", selector, exc)
 
 
-async def _is_access_denied(page) -> bool:
+async def _is_access_denied(page: Page) -> bool:
     try:
         if await page.locator("text=Access Denied").count() > 0:
             return True
         if await page.locator("text=You don't have permission to access").count() > 0:
             return True
-    except Exception:
+    except Exception as exc:
+        logger.debug("[SHOP] Access denied check failed: %s", exc)
         return False
     return False
 
 
-async def _fill_first_input(page, selectors: list[str], value: str) -> bool:
+async def _fill_first_input(page: Page, selectors: list[str], value: str) -> bool:
     for selector in selectors:
         try:
             el = page.locator(selector)
             if await el.count() > 0:
                 await el.first.fill(value, timeout=4000)
                 return True
-        except Exception:
-            continue
+        except Exception as exc:
+            logger.debug("[SHOP] Failed to fill input (%s): %s", selector, exc)
     return False
 
 
-async def _capture_login_error_screenshot(page, tag: str) -> str | None:
+async def _capture_login_error_screenshot(page: Page | None, tag: str) -> str | None:
     if not page:
         return None
     try:
@@ -232,8 +281,8 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
     Авторизация на https://castleclash.igg.com/shop/ через email+пароль.
     Возвращает cookies и uid (если найден).
     """
-    ctx = None
-    page = None
+    ctx: ShopContext | None = None
+    page: Page | None = None
     try:
         from playwright.async_api import async_playwright
         async with async_playwright() as p:
@@ -253,23 +302,33 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
             page = ctx["page"]
             try:
                 await context.clear_cookies()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("[SHOP] Failed to clear cookies: %s", exc)
 
             logger.info("[SHOP] 🌍 Открываем страницу магазина")
-            await page.goto("https://castleclash.igg.com/shop/", wait_until="domcontentloaded", timeout=60000)
+            await page.goto("https://castleclash.igg.com/shop/", timeout=60000)
+            await _accept_cookies(page)
+            await wait_shop_ready(page)
             if await _is_access_denied(page):
                 await _capture_login_error_screenshot(page, "access_denied")
                 return {
                     "success": False,
                     "error": "Access Denied при открытии страницы (возможна блокировка по IP).",
+                    "uid": None,
+                    "cookies": None,
+                    "username": None,
                 }
-            await _accept_cookies(page)
             await humanize_pre_action(page)
 
             if not await _open_login_modal(page):
                 await _capture_login_error_screenshot(page, "open_login_modal")
-                return {"success": False, "error": "Не удалось открыть окно авторизации."}
+                return {
+                    "success": False,
+                    "error": "Не удалось открыть окно авторизации.",
+                    "uid": None,
+                    "cookies": None,
+                    "username": None,
+                }
 
             await _accept_cookies(page)
             await _select_login_tab(page, "email")
@@ -292,7 +351,13 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
             )
             if not filled_email:
                 await _capture_login_error_screenshot(page, "email_not_found")
-                return {"success": False, "error": "Не найдено поле для email."}
+                return {
+                    "success": False,
+                    "error": "Не найдено поле для email.",
+                    "uid": None,
+                    "cookies": None,
+                    "username": None,
+                }
 
             logger.info("[SHOP] 🔒 Вводим пароль")
             filled_pass = await _fill_first_input(
@@ -310,7 +375,13 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
             )
             if not filled_pass:
                 await _capture_login_error_screenshot(page, "password_not_found")
-                return {"success": False, "error": "Не найдено поле для пароля."}
+                return {
+                    "success": False,
+                    "error": "Не найдено поле для пароля.",
+                    "uid": None,
+                    "cookies": None,
+                    "username": None,
+                }
 
             logger.info("[SHOP] ✅ Нажимаем кнопку входа")
             login_btn = page.locator(
@@ -325,7 +396,10 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
             else:
                 await page.keyboard.press("Enter")
 
-            await page.wait_for_timeout(4000)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=30000)
+            except PlaywrightTimeout:
+                pass
 
             logger.info("[SHOP] 🔎 Проверяем cookies после входа")
             cookies_list = await context.cookies()
@@ -334,14 +408,32 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
             uid = jwt_get_uid(token) if token else None
             if not uid:
                 await _capture_login_error_screenshot(page, "uid_not_found")
-                return {"success": False, "error": "Не удалось получить IGG ID после входа."}
+                return {
+                    "success": False,
+                    "error": "Не удалось получить IGG ID после входа.",
+                    "uid": None,
+                    "cookies": cookies_result,
+                    "username": None,
+                }
 
             logger.info("[SHOP] ✅ Вход успешен, UID=%s", uid)
-            return {"success": True, "uid": uid, "cookies": cookies_result, "username": "Игрок"}
+            return {
+                "success": True,
+                "error": None,
+                "uid": uid,
+                "cookies": cookies_result,
+                "username": "Игрок",
+            }
     except Exception as e:
         await _capture_login_error_screenshot(page, "exception")
         logger.exception(f"[SHOP] ❌ Ошибка при входе по email: {e}")
-        return {"success": False, "error": str(e)}
+        return {
+            "success": False,
+            "error": str(e),
+            "uid": None,
+            "cookies": None,
+            "username": None,
+        }
     finally:
         try:
             if ctx:
@@ -349,8 +441,8 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                     await ctx["page"].close()
                 if "context" in ctx:
                     await ctx["context"].close()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("[SHOP] Cleanup failed after email login: %s", exc)
 
 
 async def start_shop_login_igg(igg_id: str) -> dict[str, Any]:
@@ -358,8 +450,17 @@ async def start_shop_login_igg(igg_id: str) -> dict[str, Any]:
     Запускает авторизацию по IGG ID: открывает окно и нажимает «Получить код».
     Возвращает context/page для продолжения.
     """
-    ctx = None
-    playwright = None
+    ctx: ShopContext | None = None
+    playwright: Playwright | None = None
+    async def _cleanup() -> None:
+        try:
+            if ctx:
+                await ctx["page"].close()
+                await ctx["context"].close()
+            if playwright:
+                await playwright.stop()
+        except Exception as exc:
+            logger.debug("[SHOP] Cleanup failed after IGG login: %s", exc)
     try:
         from playwright.async_api import async_playwright
         playwright = await async_playwright().start()
@@ -379,15 +480,34 @@ async def start_shop_login_igg(igg_id: str) -> dict[str, Any]:
         page = ctx["page"]
 
         logger.info("[SHOP] 🌍 Открываем страницу магазина (IGG ID)")
-        await page.goto("https://castleclash.igg.com/shop/", wait_until="domcontentloaded", timeout=60000)
+        await page.goto("https://castleclash.igg.com/shop/", timeout=60000)
+        await _accept_cookies(page)
+        await wait_shop_ready(page)
         if await _is_access_denied(page):
             await _capture_login_error_screenshot(page, "access_denied")
-            return {"success": False, "error": "Access Denied при открытии страницы (возможна блокировка по IP)."}
-        await _accept_cookies(page)
+            await _cleanup()
+            return {
+                "success": False,
+                "error": "Access Denied при открытии страницы (возможна блокировка по IP).",
+                "context": None,
+                "page": None,
+                "playwright": None,
+                "igg_id": igg_id,
+                "owns_playwright": False,
+            }
         await humanize_pre_action(page)
 
         if not await _open_login_modal(page):
-            return {"success": False, "error": "Не удалось открыть окно авторизации."}
+            await _cleanup()
+            return {
+                "success": False,
+                "error": "Не удалось открыть окно авторизации.",
+                "context": None,
+                "page": None,
+                "playwright": None,
+                "igg_id": igg_id,
+                "owns_playwright": False,
+            }
 
         await _select_login_tab(page, "igg")
 
@@ -402,40 +522,72 @@ async def start_shop_login_igg(igg_id: str) -> dict[str, Any]:
             igg_id,
         )
         if not filled:
-            return {"success": False, "error": "Не найдено поле для IGG ID."}
+            await _cleanup()
+            return {
+                "success": False,
+                "error": "Не найдено поле для IGG ID.",
+                "context": None,
+                "page": None,
+                "playwright": None,
+                "igg_id": igg_id,
+                "owns_playwright": False,
+            }
 
         logger.info("[SHOP] 📩 Нажимаем «Получить код»")
         code_btn = page.locator("button.passport--sub-btn:has-text('Получить код')")
         if await code_btn.count() > 0:
             await code_btn.first.click(timeout=5000)
         else:
-            return {"success": False, "error": "Не удалось нажать «Получить код»."}
+            await _cleanup()
+            return {
+                "success": False,
+                "error": "Не удалось нажать «Получить код».",
+                "context": None,
+                "page": None,
+                "playwright": None,
+                "igg_id": igg_id,
+                "owns_playwright": False,
+            }
 
-        await page.wait_for_timeout(1500)
+        try:
+            await page.wait_for_load_state("networkidle", timeout=15000)
+        except PlaywrightTimeout:
+            pass
+
+        await page.wait_for_selector(
+            'input.passport--password-ipt, input[placeholder*="Код"]',
+            timeout=15000,
+        )
 
         return {
             "success": True,
+            "error": None,
             "context": context,
             "page": page,
             "playwright": playwright,
             "igg_id": igg_id,
+            "owns_playwright": True,
         }
     except Exception as e:
         logger.exception(f"[SHOP] ❌ Ошибка при входе по IGG ID: {e}")
-        try:
-            if ctx:
-                if "page" in ctx:
-                    await ctx["page"].close()
-                if "context" in ctx:
-                    await ctx["context"].close()
-            if playwright:
-                await playwright.stop()
-        except Exception:
-            pass
-        return {"success": False, "error": str(e)}
+        await _cleanup()
+        return {
+            "success": False,
+            "error": str(e),
+            "context": None,
+            "page": None,
+            "playwright": None,
+            "igg_id": igg_id,
+            "owns_playwright": False,
+        }
 
 
-async def complete_shop_login_igg(context, page, code: str, playwright=None) -> dict[str, Any]:
+async def complete_shop_login_igg(
+    context: BrowserContext,
+    page: Page,
+    code: str,
+    playwright: Playwright | None = None,
+) -> dict[str, Any]:
     """
     Завершает авторизацию по IGG ID кодом.
     """
@@ -450,7 +602,13 @@ async def complete_shop_login_igg(context, page, code: str, playwright=None) -> 
             code,
         )
         if not filled:
-            return {"success": False, "error": "Не найдено поле для кода."}
+            return {
+                "success": False,
+                "error": "Не найдено поле для кода.",
+                "uid": None,
+                "cookies": None,
+                "username": None,
+            }
 
         login_btn = page.locator("a.passport--passport-common-btn.passport--yellow")
         if await login_btn.count() > 0:
@@ -458,7 +616,10 @@ async def complete_shop_login_igg(context, page, code: str, playwright=None) -> 
         else:
             await page.keyboard.press("Enter")
 
-        await page.wait_for_timeout(4000)
+        try:
+            await page.wait_for_load_state("networkidle", timeout=30000)
+        except PlaywrightTimeout:
+            pass
 
         cookies_list = await context.cookies()
         cookies_result = {c["name"]: c["value"] for c in cookies_list}
@@ -467,25 +628,27 @@ async def complete_shop_login_igg(context, page, code: str, playwright=None) -> 
 
         return {
             "success": bool(uid),
+            "error": None if uid else "Не удалось получить IGG ID после входа.",
             "uid": uid,
             "cookies": cookies_result,
             "username": "Игрок",
-            "error": None if uid else "Не удалось получить IGG ID после входа.",
         }
     except Exception as e:
         logger.exception(f"[SHOP] ❌ Ошибка при подтверждении кода: {e}")
-        return {"success": False, "error": str(e)}
+        return {
+            "success": False,
+            "error": str(e),
+            "uid": None,
+            "cookies": None,
+            "username": None,
+        }
     finally:
-        try:
-            await page.close()
-            await context.close()
-        except Exception:
-            pass
-        if playwright:
+        if playwright is None:
             try:
-                await playwright.stop()
-            except Exception:
-                pass
+                await page.close()
+                await context.close()
+            except Exception as exc:
+                logger.debug("[SHOP] Cleanup failed after IGG code: %s", exc)
 
 # ───────────────────────────────────────────────
 # 🔄 Обновление cookies через MVP (через browser_patches)
@@ -502,11 +665,16 @@ async def refresh_cookies_mvp(user_id: str, uid: str) -> dict[str, Any]:
     accounts = get_all_accounts(str(user_id))
     acc = next((a for a in accounts if a.get("uid") == uid), None)
     if not acc or not acc.get("mvp_url"):
-        return {"success": False, "error": "MVP ссылка не найдена. Добавь аккаунт заново."}
+        return {
+            "success": False,
+            "error": "MVP ссылка не найдена. Добавь аккаунт заново.",
+            "cookies": None,
+        }
 
     mvp_url = acc["mvp_url"]
     cookies_result: dict[str, str] = {}
-    ctx = None
+    ctx: ShopContext | None = None
+    cookies_saved = False
 
     try:
         from playwright.async_api import async_playwright
@@ -526,21 +694,11 @@ async def refresh_cookies_mvp(user_id: str, uid: str) -> dict[str, Any]:
             context = ctx["context"]
             page = ctx["page"]
 
-            await page.goto(mvp_url, wait_until="domcontentloaded", timeout=60000)
+            await page.goto(mvp_url, timeout=60000)
+            await _accept_cookies(page)
+            await wait_shop_ready(page)
             logger.info("[COOKIES] 🌍 Открыта страница MVP")
             await humanize_pre_action(page)
-
-            # ✅ Кнопка "Accept all"
-            try:
-                try:
-                    await page.click('div.i-cookie__btn[data-value="all"]', timeout=8000)
-                    logger.info("[COOKIES] ✅ Нажата 'Accept all' (div.i-cookie__btn)")
-                except PlaywrightTimeout:
-                    await page.click("text=Accept all", timeout=3000)
-                    logger.info("[COOKIES] ✅ Нажата 'Accept all' (по тексту)")
-                await asyncio.sleep(1.5)
-            except Exception:
-                logger.info("[COOKIES] ⚠️ Кнопка 'Accept all' не найдена — возможно, баннера нет")
 
             # 📦 Сохраняем cookies
             cookies_list = await context.cookies()
@@ -549,13 +707,29 @@ async def refresh_cookies_mvp(user_id: str, uid: str) -> dict[str, Any]:
             all_data = load_all_cookies()
             all_data.setdefault(str(user_id), {})[str(uid)] = cookies_result
             save_all_cookies(all_data)
+            cookies_saved = True
 
             logger.info(f"[COOKIES] 💾 Cookies обновлены для UID={uid}")
-            return {"success": True, "cookies": cookies_result}
+            return {
+                "success": True,
+                "error": None,
+                "cookies": cookies_result,
+            }
 
     except Exception as e:
+        if cookies_saved:
+            logger.warning("[COOKIES] ⚠️ Ошибка после сохранения cookies: %s", e)
+            return {
+                "success": True,
+                "error": None,
+                "cookies": cookies_result,
+            }
         logger.exception(f"[COOKIES] ❌ Ошибка при обновлении cookies: {e}")
-        return {"success": False, "error": str(e)}
+        return {
+            "success": False,
+            "error": str(e),
+            "cookies": None,
+        }
 
     finally:
         try:
@@ -564,16 +738,15 @@ async def refresh_cookies_mvp(user_id: str, uid: str) -> dict[str, Any]:
                     await ctx["page"].close()
                 if "context" in ctx:
                     await ctx["context"].close()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("[COOKIES] Cleanup failed: %s", exc)
 
-    return {"success": False, "error": "Ошибка: неизвестный результат обновления cookies"}
 
 # ───────────────────────────────────────────────
 # 🎁 Извлечение награды из ответа
 # ───────────────────────────────────────────────
 
-def extract_reward_from_response(text: str) -> str:
+def extract_reward_from_response(text: str) -> str | None:
     """Пытается извлечь описание награды из JSON или HTML."""
     try:
         data = json.loads(text)
@@ -584,8 +757,8 @@ def extract_reward_from_response(text: str) -> str:
             for key in ["reward", "reward_name", "item_name", "name", "msg"]:
                 if key in data["data"]:
                     return str(data["data"][key])
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("[MVP] Reward parse failed: %s", exc)
 
     match = re.search(r'奖励[:： ]*([^"<>{}\n\r]+)', text)
     if match:
@@ -601,12 +774,14 @@ def extract_reward_from_response(text: str) -> str:
 # 🌐 Извлечение IGG ID и имени со страницы MVP (через browser_patches)
 # ───────────────────────────────────────────────
 
-async def extract_player_info_from_page(url: str) -> dict:
+async def extract_player_info_from_page(url: str) -> PlayerInfoResult:
     """
     🌐 Открывает MVP ссылку и извлекает IGG ID + имя игрока (через browser_patches).
     """
     logger.info(f"[MVP] 🌐 Открываю страницу для получения данных: {url}")
-    result = {"uid": None, "username": None}
+    uid: str | None = None
+    username: str | None = None
+    ctx: ShopContext | None = None
 
     from playwright.async_api import async_playwright
     try:
@@ -625,16 +800,11 @@ async def extract_player_info_from_page(url: str) -> dict:
             context = ctx["context"]
             page = ctx["page"]
 
-            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            await page.goto(url, timeout=60000)
+            await _accept_cookies(page)
+            await wait_shop_ready(page)
             logger.info("[MVP] ⏳ Ожидание загрузки страницы...")
             await humanize_pre_action(page)
-
-            try:
-                await page.click('div.i-cookie__btn[data-value="all"]', timeout=5000)
-                logger.info("[MVP] ✅ Кнопка 'Accept All' нажата")
-                await page.wait_for_timeout(1500)
-            except Exception:
-                logger.info("[MVP] ⚠️ Баннер cookies не найден — пропускаем")
 
             await page.wait_for_selector(".user__infos-item", timeout=45000)
             blocks = await page.query_selector_all(".user__infos-item")
@@ -644,27 +814,41 @@ async def extract_player_info_from_page(url: str) -> dict:
                 if "IGG ID" in text:
                     match = re.search(r"\b\d{6,12}\b", text)
                     if match:
-                        result["uid"] = match.group(0)
+                        uid = match.group(0)
                 elif "Имя игрока" in text:
                     match = re.search(r"Имя игрока[:：]?\s*(.+)", text)
                     if match:
-                        result["username"] = match.group(1).strip()
+                        username = match.group(1).strip()
 
-            if result["uid"] and result["username"]:
-                logger.info(f"[MVP] ✅ Найден IGG ID={result['uid']}, username={result['username']}")
-                return {"success": True, **result}
+            if uid and username:
+                logger.info(f"[MVP] ✅ Найден IGG ID={uid}, username={username}")
+                return {
+                    "success": True,
+                    "error": None,
+                    "uid": uid,
+                    "username": username,
+                }
 
-            return {"success": False, "error": "Не удалось извлечь IGG ID или имя"}
+            return {
+                "success": False,
+                "error": "Не удалось извлечь IGG ID или имя",
+                "uid": uid,
+                "username": username,
+            }
 
     except Exception as e:
         logger.error(f"[MVP] ❌ Ошибка при открытии страницы: {e}")
-        return {"success": False, "error": str(e)}
+        return {
+            "success": False,
+            "error": str(e),
+            "uid": None,
+            "username": None,
+        }
 
     finally:
         try:
-            if "page" in locals():
-                await page.close()
-            if "context" in locals():
-                await context.close()
-        except Exception:
-            pass
+            if ctx:
+                await ctx["page"].close()
+                await ctx["context"].close()
+        except Exception as exc:
+            logger.debug("[MVP] Cleanup failed: %s", exc)
