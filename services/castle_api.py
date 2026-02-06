@@ -229,6 +229,7 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
             ctx = await launch_masked_persistent_context(
                 p,
                 user_data_dir="data/chrome_profiles/_shop_email",
+                browser_path=BROWSER_PATH,
                 headless=True,
                 slow_mo=30,
                 profile=profile,
@@ -367,6 +368,7 @@ async def start_shop_login_igg(igg_id: str) -> dict[str, Any]:
         ctx = await launch_masked_persistent_context(
             playwright,
             user_data_dir=f"data/chrome_profiles/_shop_igg_{igg_id}",
+            browser_path=BROWSER_PATH,
             headless=True,
             slow_mo=30,
             profile=profile,
@@ -510,6 +512,7 @@ async def refresh_cookies_mvp(user_id: str, uid: str) -> dict[str, Any]:
             ctx = await launch_masked_persistent_context(
                 p,
                 user_data_dir=f"data/chrome_profiles/{uid}",
+                browser_path=BROWSER_PATH,
                 headless=True,
                 slow_mo=30,
                 profile=profile,
@@ -606,6 +609,7 @@ async def extract_player_info_from_page(url: str) -> dict:
             ctx = await launch_masked_persistent_context(
                 p,
                 user_data_dir="data/chrome_profiles/_extract_tmp",
+                browser_path=BROWSER_PATH,
                 headless=True,
                 slow_mo=30,
                 profile=profile,
