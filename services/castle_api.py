@@ -53,6 +53,10 @@ def jwt_get_uid(token: str) -> str | None:
 
 async def _accept_cookies(page) -> None:
     try:
+        await page.wait_for_selector("div.i-cookie__btn[data-value=\"all\"]", timeout=3000)
+    except Exception:
+        pass
+    try:
         if await page.locator("#onetrust-accept-btn-handler").count() > 0:
             await page.click("#onetrust-accept-btn-handler", timeout=5000)
             await asyncio.sleep(1.0)
@@ -60,7 +64,12 @@ async def _accept_cookies(page) -> None:
     except Exception:
         pass
 
-    for selector in ("text=Accept all", "text=Accept All", "text=Принять все"):
+    for selector in (
+        "text=Accept all",
+        "text=Accept All",
+        "text=Принять все",
+        "div.i-cookie__btn[data-value=\"all\"]",
+    ):
         try:
             if await page.locator(selector).count() > 0:
                 await page.click(selector, timeout=3000)
@@ -199,6 +208,7 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                 await _capture_login_error_screenshot(page, "open_login_modal")
                 return {"success": False, "error": "Не удалось открыть окно авторизации."}
 
+            await _accept_cookies(page)
             await _select_login_tab(page, "email")
 
             filled_email = await _fill_first_input(
