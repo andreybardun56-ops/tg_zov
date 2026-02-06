@@ -10,7 +10,6 @@ from typing import Any
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 from services.logger import logger
 from services.browser_patches import (
-    apply_headless_patches,
     launch_masked_persistent_context,
     get_random_browser_profile,
 )
@@ -220,31 +219,24 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
     Авторизация на https://castleclash.igg.com/shop/ через email+пароль.
     Возвращает cookies и uid (если найден).
     """
-    browser = None
-    context = None
+    ctx = None
     page = None
     try:
         from playwright.async_api import async_playwright
         async with async_playwright() as p:
             profile = get_random_browser_profile()
             logger.info("[SHOP] ▶ Запуск браузера для входа по email")
-            browser = await p.chromium.launch(headless=True, slow_mo=30)
-            context = await browser.new_context(
-                viewport=profile["viewport"],
-                user_agent=profile["user_agent"],
-                locale=profile["locale"],
-                timezone_id=profile["timezone"],
-                is_mobile=profile["is_mobile"],
-                device_scale_factor=profile["device_scale_factor"],
-                java_script_enabled=True,
+            ctx = await launch_masked_persistent_context(
+                p,
+                user_data_dir="data/chrome_profiles/_shop_email",
+                headless=True,
+                slow_mo=30,
+                profile=profile,
             )
-            page = await context.new_page()
+            context = ctx["context"]
+            page = ctx["page"]
             try:
-                await apply_headless_patches(context, page=page, profile=profile)
-            except Exception:
-                pass
-            try:
-                await context.set_extra_http_headers({"Accept-Language": profile.get("accept_language", "en-US,en")})
+                await context.clear_cookies()
             except Exception:
                 pass
 
@@ -351,12 +343,11 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
         return {"success": False, "error": str(e)}
     finally:
         try:
-            if page:
-                await page.close()
-            if context:
-                await context.close()
-            if browser:
-                await browser.close()
+            if ctx:
+                if "page" in ctx:
+                    await ctx["page"].close()
+                if "context" in ctx:
+                    await ctx["context"].close()
         except Exception:
             pass
 
