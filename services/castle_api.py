@@ -70,13 +70,38 @@ async def _accept_cookies(page) -> None:
 
 
 async def _open_login_modal(page) -> bool:
-    try:
-        btn = page.locator("div.btn-login.login__btn.before-login:has-text('Авторизация')")
-        if await btn.count() > 0:
+    selectors = [
+        "div.btn-login.login__btn.before-login:has-text('Авторизация')",
+        "div.userbar .btn-login.login__btn.before-login",
+        ".main .userbar .btn-login.login__btn.before-login",
+    ]
+    for selector in selectors:
+        try:
+            await page.wait_for_selector(selector, state="visible", timeout=8000)
+            btn = page.locator(selector).first
+            await btn.scroll_into_view_if_needed()
             await btn.click(timeout=5000)
             return True
-    except Exception:
-        pass
+        except Exception:
+            continue
+
+    for selector in selectors:
+        try:
+            clicked = await page.evaluate(
+                """
+                (sel) => {
+                    const el = document.querySelector(sel);
+                    if (!el) return false;
+                    el.click();
+                    return true;
+                }
+                """,
+                selector,
+            )
+            if clicked:
+                return True
+        except Exception:
+            continue
 
     try:
         btn = page.locator("text=Авторизация")

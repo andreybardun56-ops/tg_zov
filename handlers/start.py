@@ -37,7 +37,8 @@ from services.farm_puzzles_auto import (
 )
 from services.farm_puzzles_duplicates_auto import (
     start_farm as start_duplicates_farm,
-    is_farm_running as is_duplicates_running
+    is_farm_running as is_duplicates_running,
+    stop_farm as stop_duplicates_farm,
 )
 
 from services.castle_api import (
@@ -158,7 +159,11 @@ def get_admin_puzzles_menu() -> ReplyKeyboardMarkup:
         ],
         [
             KeyboardButton(text="🧩 Собрать пазл"),
-            KeyboardButton(text="🧩 Фарм дублей"),
+            KeyboardButton(
+                text="⛔️ Остановить фарм дублей"
+                if is_duplicates_running()
+                else "🧩 Фарм дублей"
+            ),
         ],
     ]
 
@@ -966,6 +971,22 @@ async def start_farm_duplicates(message: types.Message):
     else:
         await message.answer(
             "⚠️ Не удалось запустить фарм дублей. Попробуй позже.",
+            reply_markup=get_admin_puzzles_menu()
+        )
+
+
+@router.message(F.text == "⛔️ Остановить фарм дублей")
+async def stop_farm_duplicates(message: types.Message):
+    """Остановка фарма дублей (только для админа)."""
+    stopped = await stop_duplicates_farm()
+    if stopped:
+        await message.answer(
+            "🛑 Фарм дублей остановлен.",
+            reply_markup=get_admin_puzzles_menu()
+        )
+    else:
+        await message.answer(
+            "⚠️ Фарм дублей сейчас не запущен.",
             reply_markup=get_admin_puzzles_menu()
         )
 

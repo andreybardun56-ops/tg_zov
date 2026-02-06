@@ -189,6 +189,8 @@ async def run_farm_duplicates(bot: Optional[Bot] = None) -> Dict[str, Any]:
             except Exception as e:
                 logger.warning(f"[FARM-DUPES] Не удалось отправить стартовое сообщение админу {admin_id}: {e}")
 
+    last_texts: Dict[int, str] = {}
+
     async def progress_updater():
         while IS_FARM_RUNNING:
             if not bot or not msg_map:
@@ -199,6 +201,8 @@ async def run_farm_duplicates(bot: Optional[Bot] = None) -> Dict[str, Any]:
                 if data:
                     text = format_dupes_stats(data)
                     for admin_id, msg in msg_map.items():
+                        if last_texts.get(admin_id) == text:
+                            continue
                         try:
                             await bot.edit_message_text(
                                 text=text,
@@ -206,7 +210,11 @@ async def run_farm_duplicates(bot: Optional[Bot] = None) -> Dict[str, Any]:
                                 message_id=msg.message_id,
                                 parse_mode="HTML",
                             )
+                            last_texts[admin_id] = text
                         except Exception as e:
+                            if "message is not modified" in str(e):
+                                last_texts[admin_id] = text
+                                continue
                             logger.warning(f"[FARM-DUPES] ⚠️ Не удалось обновить сообщение {admin_id}: {e}")
                 await asyncio.sleep(15)
             except Exception as e:
