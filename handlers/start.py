@@ -1,11 +1,7 @@
 # tg_zov/handlers/start.py
 import json
 import os
-import asyncio
-import shutil
-from pathlib import Path
 from typing import List, Optional
-from html import escape
 from pathlib import Path
 import shutil
 from services.logger import logger
@@ -13,9 +9,17 @@ from aiogram import Router, types, F
 from aiogram.filters import Command
 from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton,
-    InlineKeyboardMarkup, InlineKeyboardButton,
     CallbackQuery
 )
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import Message, ReplyKeyboardRemove
+from aiogram.fsm.context import FSMContext
+from html import escape
+import asyncio, logging
+
+from keyboards.inline import EXCHANGE_ITEMS
+from services.puzzle_exchange_auto import get_fragments, exchange, start_session, close_session
+
 from config import ADMIN_IDS
 import services.login_and_refresh as lr1
 import services.login_and_refresh_2 as lr2
@@ -23,12 +27,14 @@ from services.lucky_wheel_auto import run_lucky_wheel
 from services.puzzle_claim_auto import claim_puzzle
 from services.puzzle_claim import issue_puzzle_codes, issue_specific_puzzle
 from services.dragon_quest import run_dragon_quest
+from services.puzzle_claim_auto2 import auto_claim_puzzle2, claim_puzzles_batch
 from services.accounts_manager import load_all_users
 from services.farm_puzzles_auto import (
     is_farm_running,
     start_farm,
-    stop_farm,
+    stop_farm
 )
+
 from services.castle_api import extract_player_info_from_page, refresh_cookies_mvp
 from services.event_manager import run_full_event_cycle
 from keyboards.inline import (
@@ -41,7 +47,7 @@ from keyboards.inline import (
 )
 from keyboards.inline import send_exchange_items
 from services.event_checker import check_all_events
-from services.puzzle_exchange_auto import get_fragment_count, exchange_item
+from services.accounts_manager import get_all_accounts
 router = Router()
 USER_ACCOUNTS_FILE = "data/user_accounts.json"
 PARALLEL_REFRESH_PROCESSES = 2
@@ -57,6 +63,7 @@ for path in (
 ):
     path.mkdir(parents=True, exist_ok=True)
 
+CLAIM_PUZZLES_CB = "claim_puzzles"
 
 def is_cookie_refresh_running() -> bool:
     return any(task for task in COOKIE_REFRESH_TASKS if not task.done())
@@ -109,19 +116,31 @@ admin_events_menu = ReplyKeyboardMarkup(
 
 # 🧩 Подменю пазлов
 def get_admin_puzzles_menu() -> ReplyKeyboardMarkup:
-    farm_button_text = "⛔️ Остановить фарм" if is_farm_running() else "🧩 Фарм пазлов"
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="━━━━━━━━━━━ 🧩 Пазлы ━━━━━━━━━━━")],
-            [
-                KeyboardButton(text="🧩 Получить пазлы"),
-                KeyboardButton(text="🧩 Взять пазл"),
-                KeyboardButton(text=farm_button_text)
-            ],
-            [KeyboardButton(text="🔙 Назад к событиям")]
+    if is_farm_running():
+        farm_btn = "⏸ Пауза фарма"
+        stop_btn = "⛔️ Остановить фарм"
+    else:
+        farm_btn = "▶️ Продолжить фарм"
+        stop_btn = None
+
+    keyboard = [
+        [KeyboardButton(text="━━━━━━━━━━━ 🧩 Пазлы ━━━━━━━━━━━")],
+        [
+            KeyboardButton(text="🧩 Получить пазлы"),
+            KeyboardButton(text="🧩 Взять пазл"),
         ],
-        resize_keyboard=True
-    )
+        [
+            KeyboardButton(text="🧩 Собрать пазл"),
+            KeyboardButton(text=farm_btn),
+        ],
+    ]
+
+    if stop_btn:
+        keyboard.append([KeyboardButton(text=stop_btn)])
+
+    keyboard.append([KeyboardButton(text="🔙 Назад к событиям")])
+
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 # ⚙️ Управление
 def get_admin_manage_menu() -> ReplyKeyboardMarkup:
@@ -209,11 +228,8 @@ async def open_system_menu(message: types.Message):
     await message.answer("🔧 Системное меню:", reply_markup=admin_system_menu)
 
 
-@router.message(F.text.in_({"🧩 Взять пазл", "🧩 Собрать пазл"}))
+@router.message(F.text.in_({"🧩 Взять пазл"}))
 async def open_collect_puzzle_menu(message: types.Message):
-    if message.from_user.id not in ADMIN_IDS:
-        await message.answer("🚫 У тебя нет доступа к этой функции.")
-        return
     await message.answer(
         "🧩 Выбери номер пазла 1–9:",
         reply_markup=get_collect_puzzle_kb()
@@ -222,9 +238,6 @@ async def open_collect_puzzle_menu(message: types.Message):
 
 @router.callback_query(F.data == "collect_puzzle")
 async def handle_collect_puzzle_back(callback: CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
-        await callback.answer("🚫 Нет доступа.", show_alert=True)
-        return
     await callback.answer()
     text = "🧩 Выбери номер пазла 1–9:"
     try:
@@ -235,10 +248,6 @@ async def handle_collect_puzzle_back(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("collect_puzzle:"))
 async def handle_collect_specific_puzzle(callback: CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
-        await callback.answer("🚫 Нет доступа.", show_alert=True)
-        return
-
     await callback.answer()
     try:
         _, puzzle_str = callback.data.split(":", 1)
@@ -439,6 +448,7 @@ async def cleanup_trash(message: types.Message):
         Path("data/logs"),
         Path("data/fails"),
         Path("data/failures"),
+        Path("logs"),
     ]
 
     deleted = []
@@ -571,7 +581,6 @@ async def refresh_cookies_in_database(message: types.Message):
                     f"📊 Обработано: <b>{combined_done}</b> из <b>{combined_total}</b>",
                     parse_mode="HTML",
                 )
-                await status_msg.edit_text(text, parse_mode="HTML")
             except Exception:
                 pass
         except Exception as e:
@@ -645,19 +654,53 @@ async def start_farm_puzzles(message: types.Message):
             reply_markup=get_admin_puzzles_menu()
         )
 
+@router.message(F.text == "⏸ Пауза фарма")
+async def pause_farm_puzzles(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("🚫 У тебя нет доступа.")
+        return
+
+    stopped = await stop_farm(save_state=True)
+    if stopped:
+        await message.answer(
+            "⏸ Фарм остановлен.\n"
+            "Текущее состояние сохранено, можно продолжить позже.",
+            reply_markup=get_admin_puzzles_menu()
+        )
+    else:
+        await message.answer(
+            "⚠️ Фарм сейчас не запущен.",
+            reply_markup=get_admin_puzzles_menu()
+        )
+
+@router.message(F.text == "▶️ Продолжить фарм")
+async def resume_farm_puzzles(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("🚫 У тебя нет доступа.")
+        return
+
+    started = await start_farm(message.bot, resume=True)
+    if started:
+        await message.answer(
+            "▶️ Фарм продолжен с последнего аккаунта.",
+            reply_markup=get_admin_puzzles_menu()
+        )
+    else:
+        await message.answer(
+            "⚠️ Фарм уже запущен.",
+            reply_markup=get_admin_puzzles_menu()
+        )
 
 @router.message(F.text == "⛔️ Остановить фарм")
 async def stop_farm_puzzles(message: types.Message):
-    """Останавливает текущий фарм пазлов."""
-    user_id = message.from_user.id
-    if user_id not in ADMIN_IDS:
-        await message.answer("🚫 У тебя нет доступа к этой функции.")
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("🚫 У тебя нет доступа.")
         return
 
-    stopped = await stop_farm()
+    stopped = await stop_farm(save_state=False)
     if stopped:
         await message.answer(
-            "🛑 Останавливаю фарм пазлов... Подожди пару секунд.",
+            "🛑 Фарм полностью остановлен.\nСостояние сброшено.",
             reply_markup=get_admin_puzzles_menu()
         )
     else:
@@ -671,12 +714,17 @@ puzzle_submenu = ReplyKeyboardMarkup(
     keyboard=[
         [
             KeyboardButton(text="🧩 Получить пазлы"),
+            KeyboardButton(text="🧩 Взять пазл")
+        ],
+        [
+            KeyboardButton(text="🧩 Собрать пазл"),
             KeyboardButton(text="♻️ Обменять пазлы")
         ],
         [KeyboardButton(text="🔙 Назад")]
     ],
     resize_keyboard=True
 )
+
 # ------------------------------------ 🧩 Пазлы ------------------------------------
 @router.message(F.text == "🧩 Пазлы")
 async def puzzles_menu(message: types.Message):
@@ -706,7 +754,6 @@ async def get_puzzles(message: types.Message):
         reply_markup=get_puzzle_accounts_kb(accounts, is_admin)
     )
 
-
 # ♻️ Обменять пазлы
 @router.message(F.text == "♻️ Обменять пазлы")
 async def exchange_puzzles(message: types.Message):
@@ -728,10 +775,6 @@ async def exchange_puzzles(message: types.Message):
 @router.callback_query(F.data == "get_30_puzzles")
 async def give_30_puzzles_cb(callback: CallbackQuery):
     user_id = callback.from_user.id
-    if user_id not in ADMIN_IDS:
-        await callback.answer("🚫 У тебя нет доступа к этой функции.", show_alert=True)
-        return
-
     await callback.answer()  # закроет "часики"
     await callback.message.answer("⏳ Собираю твои 30 кодов...")
 
@@ -774,73 +817,189 @@ async def handle_puzzle_claim(callback: CallbackQuery):
 
     asyncio.create_task(run_claim())
 
+#-------------------------------------Автосбор 30 пазлов-----------------------------------
+class CollectPuzzleState(StatesGroup):
+    waiting_for_amount = State()
+
+@router.message(F.text == "🧩 Собрать пазл")
+async def ask_puzzle_amount(message: Message, state: FSMContext):
+    await message.answer(
+        "Введите количество пазлов для сбора (максимум 30):",
+    )
+    # Переходим в состояние ожидания ввода
+    await state.set_state(CollectPuzzleState.waiting_for_amount)
+
+@router.message(CollectPuzzleState.waiting_for_amount)
+async def collect_puzzle_amount(message: Message, state: FSMContext):
+    try:
+        amount = int(message.text)
+        if amount < 1 or amount > 30:
+            await message.answer("⚠️ Введите число от 1 до 30.")
+            return
+    except ValueError:
+        await message.answer("⚠️ Введите корректное число.")
+        return
+
+    user_id = str(message.from_user.id)
+    await message.answer(f"⏳ Запускаю сбор {amount} пазлов...")
+
+    from services.puzzle_claim_auto2 import auto_claim_puzzle2
+    asyncio.create_task(auto_claim_puzzle2(user_id, bot=message.bot, amount=amount))
+
+    # Сбрасываем состояние, чтобы обработчик больше не ловил сообщения
+    await state.clear()
+
 # ------------------------------------ ♻️ ОБМЕН ПАЗЛОВ ------------------------------------
+logger = logging.getLogger("exchange")
+
+# ---------------- FSM ----------------
+class ExchangePuzzleState(StatesGroup):
+    waiting_for_amount = State()
+
+# ---------------- Обработка выбора аккаунта ----------------
 @router.callback_query(F.data.startswith("exchange_acc:"))
-async def start_exchange(callback: CallbackQuery):
+async def start_exchange(callback: types.CallbackQuery, state: FSMContext):
     """Начало обмена — проверяем количество фрагментов и показываем предметы"""
     uid = callback.data.split(":")[1]
-    user_id = callback.from_user.id
+    user_id = str(callback.from_user.id)
     await callback.answer()
     msg = await callback.message.answer("🔍 Проверяю количество фрагментов...")
 
     try:
-        # 💾 Получаем количество фрагментов через run_event_with_browser
-        result = await get_fragment_count(user_id, uid)
-        msg_text = result.get("message", "")
-        success = result.get("success", False)
+        # ------------------- Получаем cookies -------------------
+        from services.cookies_io import load_all_cookies  # твоя функция для загрузки cookies
+        cookies_db = load_all_cookies()  # должно возвращать {user_id: {iggid: [...]}}
+        user_cookies = cookies_db.get(user_id, {}).get(uid)
+        if not user_cookies:
+            await msg.edit_text("⚠️ Нет cookies для выбранного аккаунта.")
+            return
 
-        if not success or "0" in msg_text:
+        # ------------------- Открываем сессию -------------------
+        session = await start_session(user_id, uid, user_cookies)
+        if not session or not session.get("page"):
+            await msg.edit_text("⚠️ Не удалось открыть браузер для обмена.")
+            return
+
+        result = await get_fragments(user_id)
+        success = result.get("success", False)
+        puzzle_left = result.get("puzzle_left", 0)
+
+        if not success or puzzle_left == 0:
             await msg.edit_text("⚠️ У тебя нет фрагментов для обмена.")
+            await close_session(user_id)
             return
 
         await msg.edit_text(
-            f"{msg_text}\nВыбери предмет для обмена 👇",
-            parse_mode="HTML",
+            f"🧩 У тебя {puzzle_left} фрагментов.\nВыбери предмет для обмена 👇",
+            parse_mode="HTML"
         )
 
-        # Показываем доступные предметы (твоя существующая функция)
+        # Показываем доступные предметы
         await send_exchange_items(callback.message.bot, user_id, uid)
 
+        # Таймаут закрытия сессии через 1 минуту
+        async def timeout_close():
+            await asyncio.sleep(60)
+            data = await state.get_data()
+            if data.get("item_id") is None:
+                await close_session(user_id)
+                try:
+                    await callback.message.answer("⌛ Сессия обмена истекла — браузер закрыт.")
+                except:
+                    pass
+        asyncio.create_task(timeout_close())
+
     except Exception as e:
         safe_err = escape(str(e))
-        await msg.edit_text(
-            f"❌ Ошибка при открытии обмена:\n<code>{safe_err}</code>",
-            parse_mode="HTML",
-        )
+        await msg.edit_text(f"❌ Ошибка при открытии обмена:\n<code>{safe_err}</code>", parse_mode="HTML")
         logger.error(f"[exchange] ❌ Ошибка открытия обмена: {e}")
 
+# ---------------- Обработка выбора предмета ----------------
 @router.callback_query(F.data.startswith("exchange_item:"))
-async def handle_exchange(callback: CallbackQuery):
-    """Обработка выбора конкретного предмета для обмена"""
+async def select_item(callback: types.CallbackQuery, state: FSMContext):
+    """Сохраняем выбранный предмет и спрашиваем количество"""
     await callback.answer()
-
-    # callback_data = "exchange_item:<uid>:<item_id>"
-    _, uid, item_id = callback.data.split(":", 2)
-
-    user_id = callback.from_user.id
-    msg = await callback.message.answer("🔁 Выполняю обмен...")
-
     try:
-        result = await exchange_item(user_id, uid, item_id)
+        _, uid, item_id = callback.data.split(":", 2)
+        user_id = str(callback.from_user.id)
 
-        if result.get("success"):
-            msg_text = result.get("message", "✅ Обмен завершён успешно!")
-            back_kb = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="↩️ Назад к обмену", callback_data=f"exchange_acc:{uid}")]
-                ]
-            )
-            await msg.edit_text(f"✅ <b>{msg_text}</b>", parse_mode="HTML", reply_markup=back_kb)
-            logger.info(f"[{uid}] ✅ Успешный обмен {item_id}")
-        else:
-            err_msg = result.get("message", "Неизвестная ошибка")
-            await msg.edit_text(f"❌ Ошибка при обмене:\n<code>{escape(err_msg)}</code>", parse_mode="HTML")
-            logger.error(f"[{uid}] ❌ Ошибка обмена {item_id}: {err_msg}")
+        # Сохраняем выбор в FSM
+        await state.update_data(item_id=item_id, uid=uid)
+
+        # Получаем текущее количество фрагментов
+        frag_result = await get_fragments(user_id)
+        puzzle_left = frag_result.get("puzzle_left", 0)
+
+        item_name, _, need_frag, _ = EXCHANGE_ITEMS[item_id]
+
+        await callback.message.answer(
+            f"Вы выбрали: <b>{item_name}</b>\n"
+            f"У вас фрагментов: <b>{puzzle_left}</b>\n"
+            f"Сколько обменять?",
+            parse_mode="HTML"
+        )
+
+        await state.set_state(ExchangePuzzleState.waiting_for_amount)
 
     except Exception as e:
         safe_err = escape(str(e))
-        await msg.edit_text(f"❌ Ошибка при обмене:\n<code>{safe_err}</code>", parse_mode="HTML")
-        logger.error(f"[exchange_handler] ❌ Ошибка при обмене: {e}")
+        await callback.message.answer(f"❌ Ошибка: <code>{safe_err}</code>", parse_mode="HTML")
+        logger.error(f"[exchange_item] ❌ Ошибка: {e}")
+
+
+# ---------------- Ввод количества предметов ----------------
+@router.message(ExchangePuzzleState.waiting_for_amount)
+async def input_amount(message: types.Message, state: FSMContext):
+    user_id = str(message.from_user.id)
+    data = await state.get_data()
+    item_id = data.get("item_id")
+    uid = data.get("uid")
+
+    if not item_id:
+        await message.answer("⚠️ Не выбран предмет для обмена.")
+        await state.clear()
+        return
+
+    try:
+        count = int(message.text)
+        if count < 1:
+            await message.answer("⚠️ Введите корректное число больше 0.")
+            return
+    except ValueError:
+        await message.answer("⚠️ Введите число.")
+        return
+
+    # Получаем количество фрагментов
+    frag_res = await get_fragments(user_id)
+    puzzle_left = frag_res.get("puzzle_left", 0)
+
+    item_name, _, need_frag, _ = EXCHANGE_ITEMS[item_id]
+    max_possible = puzzle_left // need_frag
+
+    if count > max_possible:
+        await message.answer(f"⚠️ Недостаточно фрагментов. Можно обменять максимум {max_possible}.")
+        return
+
+    msg = await message.answer("🔁 Выполняю обмен...")
+
+    # Выполняем обмен
+    results = await exchange(user_id, item_id, count)
+    success_count = sum(1 for r in results if r.get("success"))
+    fail_count = count - success_count
+
+    # Получаем остаток фрагментов
+    frag_res = await get_fragments(user_id)
+    puzzle_left = frag_res.get("puzzle_left", 0)
+
+    await msg.edit_text(
+        f"✅ Обмен завершён.\n"
+        f"Успешно: {success_count}\n"
+        f"Не удалось: {fail_count}\n"
+        f"Осталось фрагментов: {puzzle_left}"
+    )
+
+    await state.clear()
+    await close_session(user_id)
 
 #------------------------------ === Обработка кнопки 🎡 Колесо фортуны ===----------------------------------
 @router.message(lambda m: m.text == "🎡 Колесо фортуны")

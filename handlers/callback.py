@@ -9,7 +9,7 @@ from aiogram.types import Message
 
 from config import ADMIN_IDS
 from services.flop_pair import run_flop_pair, find_flop_pairs
-from services.castle_api import refresh_all_cookies
+from services.castle_api import refresh_cookies_mvp
 from services.castle_machine import run_castle_machine
 from services.thanksgiving_event import run_thanksgiving_event
 from services.promo_code import run_promo_code, load_promo_history, save_promo_history
@@ -53,7 +53,7 @@ async def handle_update_cookies(message: Message):
             elif status == "failed":
                 await message.answer(prefix + f"❌ ошибка: <i>{error_text}</i>", parse_mode="HTML")
 
-        summary = await refresh_all_cookies(progress_callback=progress)
+        summary = await refresh_cookies_mvp(progress_callback=progress)
 
         summary_lines = [
             "📊 <b>Итоги обновления cookies:</b>",
