@@ -1,17 +1,21 @@
 """castleclash MVP через HTTP (aiohttp) — исправленная версия."""
 
 import asyncio
-import re
+import base64
+import importlib
+import importlib.util
 import json
 import os
-import base64
+import re
 from datetime import datetime
 from typing import Any
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 from services.logger import logger
 from services.browser_patches import (
-    launch_masked_persistent_context,
+    BROWSER_PATH,
     get_random_browser_profile,
+    humanize_pre_action,
+    launch_masked_persistent_context,
 )
 from services.cookies_io import load_all_cookies, save_all_cookies
 from config import COOKIES_FILE
@@ -19,6 +23,15 @@ from config import COOKIES_FILE
 # ───────────────────────────────────────────────
 # 🧱 Работа с cookies.json
 # ───────────────────────────────────────────────
+SLOW_MO = 50
+
+
+def _get_stealth_callable():
+    spec = importlib.util.find_spec("playwright_stealth")
+    if spec is None:
+        return None
+    module = importlib.import_module("playwright_stealth")
+    return getattr(module, "stealth_async", None) or getattr(module, "stealth", None)
 
 def load_cookies_for_account(user_id: str, uid: str) -> dict:
     """Возвращает cookies конкретного аккаунта из cookies.json"""
@@ -225,14 +238,16 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
         from playwright.async_api import async_playwright
         async with async_playwright() as p:
             profile = get_random_browser_profile()
+            stealth_callable = _get_stealth_callable()
             logger.info("[SHOP] ▶ Запуск браузера для входа по email")
             ctx = await launch_masked_persistent_context(
                 p,
                 user_data_dir="data/chrome_profiles/_shop_email",
                 browser_path=BROWSER_PATH,
                 headless=True,
-                slow_mo=30,
+                slow_mo=SLOW_MO,
                 profile=profile,
+                stealth_callable=stealth_callable,
             )
             context = ctx["context"]
             page = ctx["page"]
@@ -266,6 +281,7 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                     "error": "Access Denied при открытии страницы (возможна блокировка по IP).",
                 }
             await _accept_cookies(page)
+            await humanize_pre_action(page)
 
             if not await _open_login_modal(page):
                 await _capture_login_error_screenshot(page, "open_login_modal")
@@ -364,14 +380,16 @@ async def start_shop_login_igg(igg_id: str) -> dict[str, Any]:
         from playwright.async_api import async_playwright
         playwright = await async_playwright().start()
         profile = get_random_browser_profile()
+        stealth_callable = _get_stealth_callable()
         logger.info("[SHOP] ▶ Запуск браузера для входа по IGG ID")
         ctx = await launch_masked_persistent_context(
             playwright,
             user_data_dir=f"data/chrome_profiles/_shop_igg_{igg_id}",
             browser_path=BROWSER_PATH,
             headless=True,
-            slow_mo=30,
+            slow_mo=SLOW_MO,
             profile=profile,
+            stealth_callable=stealth_callable,
         )
         context = ctx["context"]
         page = ctx["page"]
@@ -382,6 +400,7 @@ async def start_shop_login_igg(igg_id: str) -> dict[str, Any]:
             await _capture_login_error_screenshot(page, "access_denied")
             return {"success": False, "error": "Access Denied при открытии страницы (возможна блокировка по IP)."}
         await _accept_cookies(page)
+        await humanize_pre_action(page)
 
         if not await _open_login_modal(page):
             return {"success": False, "error": "Не удалось открыть окно авторизации."}
@@ -509,13 +528,15 @@ async def refresh_cookies_mvp(user_id: str, uid: str) -> dict[str, Any]:
         from playwright.async_api import async_playwright
         async with async_playwright() as p:
             profile = get_random_browser_profile()
+            stealth_callable = _get_stealth_callable()
             ctx = await launch_masked_persistent_context(
                 p,
                 user_data_dir=f"data/chrome_profiles/{uid}",
                 browser_path=BROWSER_PATH,
                 headless=True,
-                slow_mo=30,
+                slow_mo=SLOW_MO,
                 profile=profile,
+                stealth_callable=stealth_callable,
             )
 
             context = ctx["context"]
@@ -523,6 +544,7 @@ async def refresh_cookies_mvp(user_id: str, uid: str) -> dict[str, Any]:
 
             await page.goto(mvp_url, wait_until="domcontentloaded", timeout=60000)
             logger.info("[COOKIES] 🌍 Открыта страница MVP")
+            await humanize_pre_action(page)
 
             # ✅ Кнопка "Accept all"
             try:
@@ -606,19 +628,22 @@ async def extract_player_info_from_page(url: str) -> dict:
     try:
         async with async_playwright() as p:
             profile = get_random_browser_profile()
+            stealth_callable = _get_stealth_callable()
             ctx = await launch_masked_persistent_context(
                 p,
                 user_data_dir="data/chrome_profiles/_extract_tmp",
                 browser_path=BROWSER_PATH,
                 headless=True,
-                slow_mo=30,
+                slow_mo=SLOW_MO,
                 profile=profile,
+                stealth_callable=stealth_callable,
             )
             context = ctx["context"]
             page = ctx["page"]
 
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
             logger.info("[MVP] ⏳ Ожидание загрузки страницы...")
+            await humanize_pre_action(page)
 
             try:
                 await page.click('div.i-cookie__btn[data-value="all"]', timeout=5000)
