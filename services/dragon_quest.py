@@ -57,7 +57,7 @@ def format_rewards(data: dict) -> str:
     return "\n🎁 " + "\n🎁 ".join(lines)
 
 
-async def run_dragon_quest(user_id: str, uid: str = None) -> dict:
+async def run_dragon_quest(user_id: str, uid: str = None, context=None) -> dict:
     """
     ⚔️ Событие 'Рыцари Драконы'
     Проверяет активность, выполняет атаку и возвращает результат.
@@ -159,4 +159,4 @@ async def run_dragon_quest(user_id: str, uid: str = None) -> dict:
             "message": f"⚠️ <b>{username}</b> ({uid}) — неизвестный ответ:\n<code>{snippet}</code>"
         }
 
-    return await run_event_with_browser(user_id, uid, BASE_URL, "Рыцари Драконы", handler)
+    return await run_event_with_browser(user_id, uid, BASE_URL, "Рыцари Драконы", handler, context=context)

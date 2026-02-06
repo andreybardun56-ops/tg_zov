@@ -144,8 +144,78 @@ async def process_account(p, user_id: str, uid: str, cookies: dict, send_callbac
         await asyncio.sleep(DELAY_BETWEEN_ACCOUNTS)
 
 
+# ───────────────────────── core (existing context) ─────────────────────────
+async def process_account_in_context(context, user_id: str, uid: str, cookies: dict, send_callback: Optional[Callable] = None):
+    page = None
+    try:
+        logger.info(f"[{uid}] 🎡 Начинаю вращение колеса фортуны (reuse context)")
+        page = await context.new_page()
+
+        if cookies:
+            await context.add_cookies(cookies_to_playwright(cookies))
+        await page.goto(URL, wait_until="domcontentloaded", timeout=REQUEST_TIMEOUT)
+        await asyncio.sleep(random.uniform(1.5, 3.0))
+
+        js = f"""
+            async () => {{
+                const res = await fetch("{API}", {{
+                    method: "GET",
+                    credentials: "include"
+                }});
+                const text = await res.text();
+                try {{
+                    return JSON.parse(text);
+                }} catch {{
+                    return {{ raw: text }};
+                }}
+            }}
+        """
+        response = await page.evaluate(js)
+        await save_response(uid, response)
+
+        reward_text = None
+        if isinstance(response, dict):
+            data = response.get("data", {})
+            err = response.get("error")
+            status = response.get("status")
+
+            if err == 10 or (status == 0 and data == []):
+                reward_text = "🚫 Попытки вращения закончились."
+            elif isinstance(data, dict) and "rewards" in data:
+                rewards = data.get("rewards", [])
+                if rewards and isinstance(rewards[0], dict):
+                    reward = rewards[0].get("ap_name") or rewards[0].get("ap_desc") or "Неизвестная награда"
+                    reward_text = f"🎁 Получено: {reward}"
+                else:
+                    reward_text = f"⚠️ rewards пустые или некорректные: {rewards}"
+            else:
+                reward_text = f"⚠️ Неизвестный ответ: {response}"
+        else:
+            reward_text = f"⚠️ Ответ не является словарём: {response}"
+
+        if send_callback and reward_text:
+            await send_callback(uid, reward_text)
+
+    except Exception as e:
+        logger.exception(f"[{uid}] ❌ Ошибка в lucky_wheel (reuse context): {e}")
+        if send_callback:
+            await send_callback(uid, f"❌ Ошибка: {e}")
+    finally:
+        try:
+            if page:
+                await page.close()
+        except Exception:
+            pass
+        await asyncio.sleep(DELAY_BETWEEN_ACCOUNTS)
+
+
 # ───────────────────────── main ─────────────────────────
-async def run_lucky_wheel(user_id: Optional[str] = None, uid: Optional[str] = None, send_callback: Optional[Callable] = None):
+async def run_lucky_wheel(
+    user_id: Optional[str] = None,
+    uid: Optional[str] = None,
+    send_callback: Optional[Callable] = None,
+    context=None,
+):
     """
     Универсальный запуск:
     - если переданы user_id и uid → обрабатывается только один аккаунт (для event_manager)
@@ -161,13 +231,15 @@ async def run_lucky_wheel(user_id: Optional[str] = None, uid: Optional[str] = No
             logger.warning(msg)
             if send_callback:
                 await send_callback(uid, msg)
-            return
-
-        async with async_playwright() as p:
-            await process_account(p, user_id, uid, cookies, send_callback)
+            return {"success": False, "message": msg}
+        if context:
+            await process_account_in_context(context, user_id, uid, cookies, send_callback)
+        else:
+            async with async_playwright() as p:
+                await process_account(p, user_id, uid, cookies, send_callback)
         if send_callback:
             await send_callback(uid, "✅ Колесо фортуны завершено.")
-        return
+        return {"success": True, "message": "✅ Колесо фортуны завершено."}
 
     # 🔹 режим массового автозапуска (без параметров)
     accounts = pick_all_accounts_from_cookies()
@@ -175,7 +247,7 @@ async def run_lucky_wheel(user_id: Optional[str] = None, uid: Optional[str] = No
         logger.warning("⚠️ Нет аккаунтов для обработки (cookies.json пустой)")
         if send_callback:
             await send_callback("system", "⚠️ Нет аккаунтов для обработки (cookies.json пустой)")
-        return
+        return {"success": False, "message": "⚠️ Нет аккаунтов для обработки (cookies.json пустой)"}
 
     logger.info(f"🎡 Найдено аккаунтов: {len(accounts)}")
 
@@ -191,3 +263,4 @@ async def run_lucky_wheel(user_id: Optional[str] = None, uid: Optional[str] = No
     logger.info("✅ Колесо фортуны завершено для всех аккаунтов.")
     if send_callback:
         await send_callback("system", "✅ Колесо фортуны завершено для всех аккаунтов.")
+    return {"success": True, "message": "✅ Колесо фортуны завершено для всех аккаунтов."}

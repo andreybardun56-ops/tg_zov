@@ -90,6 +90,7 @@ DELAY_BETWEEN_LOTTERY = 1.5  # Промежуток между запросам�
 
 # === Настройки батчей ===
 BATCH_SIZE = 20  # после этого числа аккаунтов данные будут сохраняться
+BATCH_RETRY_SIZE = 100  # батч для повторной обработки 403
 # ---------------- глобальные переменные ----------------
 puzzle_batch = []  # текущий батч для сохранения
 processed_count = 0  # количество обработанных аккаунтов
@@ -258,6 +259,14 @@ def load_farm_state() -> int:
     except Exception:
         return 0
 
+def reset_farm_state() -> None:
+    """Сбрасывает сохранённое состояние фарма."""
+    try:
+        if FARM_STATE_FILE.exists():
+            FARM_STATE_FILE.unlink()
+    except Exception:
+        pass
+
 
 def cookies_to_playwright(cookies: Dict[str, str], domain: str = ".event-eu-cc.igg.com") -> List[Dict[str, Any]]:
     """Преобразует {name: value} в формат Playwright cookie"""
@@ -382,7 +391,15 @@ def calculate_puzzle_totals(file_path: Path, accounts_processed: int = None):
 
 
 # ---------------- per-account workflow ----------------
-async def process_account(account: Dict[str, Any], p) -> None:
+def is_403_response(status: int, text: str) -> bool:
+    if status == 403:
+        return True
+    if not text:
+        return False
+    return "403 FORBIDDEN" in text.upper()
+
+
+async def process_account(account: Dict[str, Any], p) -> bool:
     uid = account.get("uid")
     mail = account.get("mail", "?")
     cookies = account.get("cookies", {})
@@ -580,6 +597,9 @@ async def process_account(account: Dict[str, Any], p) -> None:
             text = resp.get("text", "")
             status = resp.get("status", 0)
             logger.info(f"[{uid}] 🎯 Ответ lottery (1-й запрос): {status} | {text[:200]}")
+            if is_403_response(status, text):
+                logger.warning(f"[{uid}] 🚫 Получен 403 на lottery, добавляем в повтор.")
+                return True
 
             # Разбираем JSON-ответ
             try:
@@ -609,6 +629,9 @@ async def process_account(account: Dict[str, Any], p) -> None:
                             status = resp.get("status", 0)
                             logger.info(
                                 f"[{uid}] 🎯 Ответ lottery ({j + 2}-й запрос): {status} | {text[:200]}")  # j=0 → 2-й, j=1 → 3-й
+                            if is_403_response(status, text):
+                                logger.warning(f"[{uid}] 🚫 Получен 403 на lottery, добавляем в повтор.")
+                                return True
 
                 except Exception as e:
                     logger.warning(f"[{uid}] ⚠️ Ошибка при разборе lottery, пропускаем: {e}")
@@ -777,97 +800,113 @@ async def process_account(account: Dict[str, Any], p) -> None:
 
         await asyncio.sleep(jitter(DELAY_BETWEEN_ACCOUNTS, variance=0.6))
 
+    return False
+
 
 # ---------------- main ----------------
 async def main():
     global FARM_RUNNING
     clear_stop_request()
     FARM_RUNNING = True
-    accounts = load_accounts()
-    start_index = load_farm_state()
+    try:
+        accounts = load_accounts()
+        start_index = load_farm_state()
 
-    if start_index >= len(accounts):
-        start_index = 0
+        if start_index >= len(accounts):
+            start_index = 0
 
-    accounts = accounts[start_index:]
+        accounts = accounts[start_index:]
 
-    if not accounts:
-        logger.error("Аккаунты не найдены в %s", DATA_DIR)
-        logger.info("▶️ Старт фарма с аккаунта #%d", start_index)
+        if not accounts:
+            logger.error("Аккаунты не найдены в %s", DATA_DIR)
+            logger.info("▶️ Старт фарма с аккаунта #%d", start_index)
 
-        return
+            return
 
-    start_time = time.perf_counter()
-    stats = {"total": len(accounts), "success": 0, "fail": 0}
-    logger.info("Всего аккаунтов: %d", len(accounts))
-    sem = asyncio.Semaphore(CONCURRENT)
+        start_time = time.perf_counter()
+        stats = {"total": len(accounts), "success": 0, "fail": 0}
+        progress_state = {"processed_total": 0}
+        logger.info("Всего аккаунтов: %d", len(accounts))
+        sem = asyncio.Semaphore(CONCURRENT)
 
-    async with async_playwright() as p:
+        async with async_playwright() as p:
 
-        async def worker(acc):
-            uid = acc.get("uid")
-            current_index = start_index + stats["success"] + stats["fail"]
+            async def run_batch(batch_accounts, allow_retry: bool, count_for_state: bool):
+                retry_accounts = []
 
-            if STOP_EVENT.is_set():
-                logger.info("[%s] ⏹ Остановка. Сохраняем позицию %d", uid, current_index)
-                save_farm_state(current_index)
-                return
-            if STOP_EVENT.is_set():
-                logger.info("[%s] ⏹ Пропуск аккаунта: сигнал остановки", uid)
-                return
-            async with sem:
-                # если стоп — сразу выход
-                if STOP_EVENT.is_set():
-                    logger.info("[%s] ⏹ Завершаем перед стартом", uid)
-                    return
+                async def worker(acc):
+                    uid = acc.get("uid")
+                    if STOP_EVENT.is_set():
+                        current_total = progress_state["processed_total"]
+                        logger.info("[%s] ⏹ Остановка. Сохраняем позицию %d", uid, start_index + current_total)
+                        save_farm_state(start_index + current_total)
+                        return
+                    async with sem:
+                        if STOP_EVENT.is_set():
+                            logger.info("[%s] ⏹ Завершаем перед стартом", uid)
+                            return
 
-                # если после ожидания пришёл стоп
-                if STOP_EVENT.is_set():
-                    logger.info("[%s] ⏹ Завершаем после паузы", uid)
-                    return
+                        try:
+                            needs_retry = await process_account(acc, p)
+                            if needs_retry:
+                                if allow_retry:
+                                    retry_accounts.append(acc)
+                                else:
+                                    stats["fail"] += 1
+                            else:
+                                stats["success"] += 1
+                        except Exception as e:
+                            stats["fail"] += 1
+                            logger.error(f"[{uid}] ❌ Ошибка: {e}")
+                        finally:
+                            if count_for_state:
+                                progress_state["processed_total"] += 1
+                                save_farm_state(start_index + progress_state["processed_total"])
+
+                tasks = [asyncio.create_task(worker(acc)) for acc in batch_accounts]
 
                 try:
-                    await process_account(acc, p)
-                    stats["success"] += 1
-                    save_farm_state(start_index + stats["success"] + stats["fail"])
-                except Exception as e:
-                    stats["fail"] += 1
-                    save_farm_state(start_index + stats["success"] + stats["fail"])
-                    logger.error(f"[{uid}] ❌ Ошибка: {e}")
+                    await tqdm_asyncio.gather(*tasks, desc="Обработка аккаунтов", total=len(tasks))
+                except asyncio.CancelledError:
+                    for t in tasks:
+                        t.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    raise
 
-        tasks = [asyncio.create_task(worker(acc)) for acc in accounts]
+                return retry_accounts
 
+            for batch_start in range(0, len(accounts), BATCH_RETRY_SIZE):
+                if STOP_EVENT.is_set():
+                    break
+                batch = accounts[batch_start:batch_start + BATCH_RETRY_SIZE]
+                retry_accounts = await run_batch(batch, allow_retry=True, count_for_state=True)
+                if retry_accounts and not STOP_EVENT.is_set():
+                    await run_batch(retry_accounts, allow_retry=False, count_for_state=False)
+
+        # сохраняем остатки батча
+        async with puzzle_lock:
+            if puzzle_batch:
+                logger.info(f"💾 Сохраняем остаток данных: {len(puzzle_batch)} аккаунтов")
+                for e in puzzle_batch:
+                    save_puzzle_data(e, DATA_FILE)
+                puzzle_batch.clear()
+
+        # итоговый подсчёт
         try:
-            await tqdm_asyncio.gather(*tasks, desc="Обработка аккаунтов", total=len(tasks))
-        except asyncio.CancelledError:
-            for t in tasks:
-                t.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            raise
+            calculate_puzzle_totals(DATA_FILE, accounts_processed=stats["success"])
+            logger.info("🧮 Итоговый подсчёт пазлов выполнен успешно")
+        except Exception as e:
+            logger.warning("⚠️ Не удалось пересчитать итоговые пазлы: %s", e)
 
-    # сохраняем остатки батча
-    async with puzzle_lock:
-        if puzzle_batch:
-            logger.info(f"💾 Сохраняем остаток данных: {len(puzzle_batch)} аккаунтов")
-            for e in puzzle_batch:
-                save_puzzle_data(e, DATA_FILE)
-            puzzle_batch.clear()
-
-    # итоговый подсчёт
-    try:
-        calculate_puzzle_totals(DATA_FILE, accounts_processed=stats["success"])
-        logger.info("🧮 Итоговый подсчёт пазлов выполнен успешно")
-    except Exception as e:
-        logger.warning("⚠️ Не удалось пересчитать итоговые пазлы: %s", e)
-
-    total_time = round(time.perf_counter() - start_time, 2)
-    logger.info("=== ✅ Итог ===")
-    logger.info(f"Всего аккаунтов: {stats['total']}")
-    logger.info(f"Успешно: {stats['success']}")
-    logger.info(f"Ошибок: {stats['fail']}")
-    logger.info(f"Время выполнения: {total_time} сек.")
-    logger.info("Все аккаунты обработаны.")
-    FARM_RUNNING = False
+        total_time = round(time.perf_counter() - start_time, 2)
+        logger.info("=== ✅ Итог ===")
+        logger.info(f"Всего аккаунтов: {stats['total']}")
+        logger.info(f"Успешно: {stats['success']}")
+        logger.info(f"Ошибок: {stats['fail']}")
+        logger.info(f"Время выполнения: {total_time} сек.")
+        logger.info("Все аккаунты обработаны.")
+    finally:
+        FARM_RUNNING = False
 if __name__ == "__main__":
     print("🚀 Запуск puzzle2_auto.py...")
     try:

@@ -232,6 +232,14 @@ async def process_single_account(playwright, sem, file_path: Path, account: Dict
             browser = await playwright.chromium.launch(headless=True, slow_mo=SLOW_MO)
             context = await browser.new_context()
             page = await context.new_page()
+            had_403 = False
+
+            def handle_response(response):
+                nonlocal had_403
+                if response.status == 403:
+                    had_403 = True
+
+            page.on("response", handle_response)
 
             login_url = "https://passport.igg.com/login"
             await page.goto(login_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
@@ -366,7 +374,10 @@ async def process_single_account(playwright, sem, file_path: Path, account: Dict
             if ok:
                 logger.info(f"[OK] {mail} uid={uid} — куки обновлены в {file_path.name}")
             await asyncio.sleep(DELAY_AFTER_SUCCESS)
-            return {"uid": str(uid), "cookies": cookies_flat}
+            if had_403:
+                logger.warning(f"[403] {mail} uid={uid} — требуется повторная попытка")
+                return {"uid": str(uid), "cookies": cookies_flat, "retry_403": True}
+            return {"uid": str(uid), "cookies": cookies_flat, "retry_403": False}
 
         except PWError as e:
             logger.exception(f"[ERROR] {mail} — playwright error: {e}")
@@ -450,59 +461,76 @@ async def process_all_files(
 
     async with async_playwright() as pw:
         sem = asyncio.Semaphore(CONCURRENT)
-        job_iter = iter(pending_jobs)
-        running_tasks: Set[asyncio.Task] = set()
-        submissions_finished = False
-        stop_announced = False
 
-        while True:
-            if not stop_announced and is_stop_requested():
-                stop_announced = True
-                logger.info("[WORKER %s] Получен запрос остановки. Дожидаемся текущие задачи.", WORKER_ID)
+        async def process_jobs(jobs, allow_retry: bool):
+            nonlocal completed
+            retry_jobs = []
+            job_iter = iter(jobs)
+            running_tasks: Dict[asyncio.Task, tuple[Path, Dict[str, Any]]] = {}
+            submissions_finished = False
+            stop_announced = False
 
-            while not stop_announced and len(running_tasks) < CONCURRENT and not submissions_finished:
-                try:
-                    file_path, account = next(job_iter)
-                except StopIteration:
-                    submissions_finished = True
+            while True:
+                if not stop_announced and is_stop_requested():
+                    stop_announced = True
+                    logger.info("[WORKER %s] Получен запрос остановки. Дожидаемся текущие задачи.", WORKER_ID)
+
+                while not stop_announced and len(running_tasks) < CONCURRENT and not submissions_finished:
+                    try:
+                        file_path, account = next(job_iter)
+                    except StopIteration:
+                        submissions_finished = True
+                        break
+                    task = asyncio.create_task(process_single_account(pw, sem, file_path, account))
+                    running_tasks[task] = (file_path, account)
+
+                if not running_tasks:
+                    if submissions_finished or stop_announced:
+                        break
+                    await asyncio.sleep(0.1)
+                    continue
+
+                done, pending = await asyncio.wait(running_tasks.keys(), return_when=asyncio.FIRST_COMPLETED)
+
+                for finished in done:
+                    file_path, account = running_tasks.pop(finished, (None, None))
+                    try:
+                        result = finished.result()
+                        if result and result.get("retry_403") and allow_retry and file_path and account:
+                            retry_jobs.append((file_path, account))
+                    except Exception:
+                        pass
+
+                    completed += 1
+                    percent = completed / total_accounts if total_accounts else 0
+                    filled = int(percent * 20)
+                    bar = "█" * filled + "-" * (20 - filled)
+
+                    elapsed = time.time() - start_time
+                    est_total = elapsed / completed * total_accounts if completed else 0
+                    remaining = max(est_total - elapsed, 0)
+                    spinner_icon = next(spinner)
+
+                    sys.stdout.write(
+                        f"\r{spinner_icon} [{bar}] {percent * 100:5.1f}% | {completed:3d}/{total_accounts} | Осталось ~{remaining:5.1f} сек"
+                    )
+                    sys.stdout.flush()
+
+                    await _maybe_call_progress(percent, completed, total_accounts)
+
+                if submissions_finished and not running_tasks:
                     break
-                running_tasks.add(asyncio.create_task(process_single_account(pw, sem, file_path, account)))
 
-            if not running_tasks:
-                if submissions_finished or stop_announced:
-                    break
-                await asyncio.sleep(0.1)
-                continue
+            return retry_jobs
 
-            done, pending = await asyncio.wait(running_tasks, return_when=asyncio.FIRST_COMPLETED)
-            running_tasks = pending
-
-            for finished in done:
-                try:
-                    finished.result()
-                except Exception:
-                    # Ошибки уже залогированы внутри process_single_account
-                    pass
-
-                completed += 1
-                percent = completed / total_accounts if total_accounts else 0
-                filled = int(percent * 20)
-                bar = "█" * filled + "-" * (20 - filled)
-
-                elapsed = time.time() - start_time
-                est_total = elapsed / completed * total_accounts if completed else 0
-                remaining = max(est_total - elapsed, 0)
-                spinner_icon = next(spinner)
-
-                sys.stdout.write(
-                    f"\r{spinner_icon} [{bar}] {percent * 100:5.1f}% | {completed:3d}/{total_accounts} | Осталось ~{remaining:5.1f} сек"
-                )
-                sys.stdout.flush()
-
-                await _maybe_call_progress(percent, completed, total_accounts)
-
-            if submissions_finished and not running_tasks:
+        batch_size = 100
+        for batch_start in range(0, len(pending_jobs), batch_size):
+            if is_stop_requested():
                 break
+            batch = pending_jobs[batch_start:batch_start + batch_size]
+            retry_jobs = await process_jobs(batch, allow_retry=True)
+            if retry_jobs and not is_stop_requested():
+                await process_jobs(retry_jobs, allow_retry=False)
 
     total_time = time.time() - start_time
     if completed >= total_accounts:

@@ -36,7 +36,7 @@ ACHIEVE_IDS = ["achieve-6", "achieve-12", "achieve-18", "achieve-24"]
 NORMAL_IDS = [f"normal-{i}" for i in range(1, 25)]
 
 
-async def run_thanksgiving_event(user_id: str, uid: str = None) -> dict:
+async def run_thanksgiving_event(user_id: str, uid: str = None, context=None) -> dict:
     """
     🎉 Акция "10 дней призов"
     Проверяет доступность события, даты и получает только актуальные награды.
@@ -181,4 +181,4 @@ async def run_thanksgiving_event(user_id: str, uid: str = None) -> dict:
             return {"success": False, "message": f"❌ Ошибка выполнения: {e}"}
 
     # 🧠 Запускаем универсально через browser_patches
-    return await run_event_with_browser(user_id, uid, BASE_URL, "10 дней призов", handler)
+    return await run_event_with_browser(user_id, uid, BASE_URL, "10 дней призов", handler, context=context)

@@ -12,7 +12,7 @@ BASE_URL = "https://event-cc.igg.com/event/gas/"
 API_URL = f"{BASE_URL}ajax.req.php?action=battlepower"
 
 
-async def run_gas_event(user_id: str, uid: str = None) -> dict:
+async def run_gas_event(user_id: str, uid: str = None, context=None) -> dict:
     """
     🧩 Акция 'Маленькая помощь (gas)'
     Проверяет наличие кнопки 'Получено' и, если доступно, получает награду.
@@ -130,4 +130,4 @@ async def run_gas_event(user_id: str, uid: str = None) -> dict:
 
         return {"success": False, "message": f"⚠️ Неизвестный ответ от сервера ({username})."}
 
-    return await run_event_with_browser(user_id, uid, BASE_URL, "Маленькая помощь", handler)
+    return await run_event_with_browser(user_id, uid, BASE_URL, "Маленькая помощь", handler, context=context)

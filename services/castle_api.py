@@ -4,6 +4,7 @@ import asyncio
 import re
 import json
 import os
+import base64
 from typing import Any
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 from services.logger import logger
@@ -30,6 +31,306 @@ def load_cookies_for_account(user_id: str, uid: str) -> dict:
     except Exception as e:
         logger.error(f"[COOKIES] ❌ Ошибка загрузки cookies: {e}")
         return {}
+
+
+def jwt_get_uid(token: str) -> str | None:
+    try:
+        parts = token.split(".")
+        if len(parts) < 2:
+            return None
+        payload = parts[1]
+        payload += "=" * (-len(payload) % 4)
+        decoded = base64.urlsafe_b64decode(payload.encode("utf-8"))
+        obj = json.loads(decoded.decode("utf-8"))
+        for key in ("sub", "uid", "userId", "user_id", "id", "jti"):
+            if key in obj and obj[key]:
+                return str(obj[key])
+    except Exception:
+        return None
+    return None
+
+
+async def _accept_cookies(page) -> None:
+    try:
+        if await page.locator("#onetrust-accept-btn-handler").count() > 0:
+            await page.click("#onetrust-accept-btn-handler", timeout=5000)
+            await asyncio.sleep(1.0)
+            return
+    except Exception:
+        pass
+
+    for selector in ("text=Accept all", "text=Accept All", "text=Принять все"):
+        try:
+            if await page.locator(selector).count() > 0:
+                await page.click(selector, timeout=3000)
+                await asyncio.sleep(1.0)
+                return
+        except Exception:
+            continue
+
+
+async def _open_login_modal(page) -> bool:
+    try:
+        btn = page.locator("div.btn-login.login__btn.before-login:has-text('Авторизация')")
+        if await btn.count() > 0:
+            await btn.click(timeout=5000)
+            return True
+    except Exception:
+        pass
+
+    try:
+        btn = page.locator("text=Авторизация")
+        if await btn.count() > 0:
+            await btn.first.click(timeout=5000)
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
+async def _select_login_tab(page, mode: str) -> None:
+    if mode == "email":
+        selectors = [
+            "a.email.passport--on:has-text('E-mail адрес')",
+            "a.email:has-text('E-mail адрес')",
+            "a:has-text('E-mail адрес')",
+        ]
+    else:
+        selectors = [
+            "a.email.passport--on:has-text('IGG ID')",
+            "a.email:has-text('IGG ID')",
+            "a:has-text('IGG ID')",
+        ]
+    for selector in selectors:
+        try:
+            el = page.locator(selector)
+            if await el.count() > 0:
+                await el.first.click(timeout=3000)
+                await asyncio.sleep(0.5)
+                return
+        except Exception:
+            continue
+
+
+async def _fill_first_input(page, selectors: list[str], value: str) -> bool:
+    for selector in selectors:
+        try:
+            el = page.locator(selector)
+            if await el.count() > 0:
+                await el.first.fill(value, timeout=4000)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def login_shop_email(email: str, password: str) -> dict[str, Any]:
+    """
+    Авторизация на https://castleclash.igg.com/shop/ через email+пароль.
+    Возвращает cookies и uid (если найден).
+    """
+    ctx = None
+    try:
+        from playwright.async_api import async_playwright
+        async with async_playwright() as p:
+            profile = get_random_browser_profile()
+            ctx = await launch_masked_persistent_context(
+                p,
+                user_data_dir="data/chrome_profiles/_shop_email",
+                headless=True,
+                slow_mo=30,
+                profile=profile,
+            )
+            context = ctx["context"]
+            page = ctx["page"]
+
+            await page.goto("https://castleclash.igg.com/shop/", wait_until="domcontentloaded", timeout=60000)
+            await _accept_cookies(page)
+
+            if not await _open_login_modal(page):
+                return {"success": False, "error": "Не удалось открыть окно авторизации."}
+
+            await _select_login_tab(page, "email")
+
+            filled_email = await _fill_first_input(
+                page,
+                [
+                    'input[type="email"]',
+                    'input[placeholder*="E-mail"]',
+                    'input[placeholder*="Email"]',
+                    'input.passport--form-ipt',
+                ],
+                email,
+            )
+            if not filled_email:
+                return {"success": False, "error": "Не найдено поле для email."}
+
+            filled_pass = await _fill_first_input(
+                page,
+                [
+                    'input[type="password"]',
+                    'input.passport--password-ipt',
+                    'input[placeholder*="Пароль"]',
+                    'input[placeholder*="Password"]',
+                ],
+                password,
+            )
+            if not filled_pass:
+                return {"success": False, "error": "Не найдено поле для пароля."}
+
+            login_btn = page.locator("a.passport--passport-common-btn.passport--yellow")
+            if await login_btn.count() > 0:
+                await login_btn.first.click(timeout=5000)
+            else:
+                await page.keyboard.press("Enter")
+
+            await page.wait_for_timeout(4000)
+
+            cookies_list = await context.cookies()
+            cookies_result = {c["name"]: c["value"] for c in cookies_list}
+            token = cookies_result.get("gpc_sso_token")
+            uid = jwt_get_uid(token) if token else None
+            if not uid:
+                return {"success": False, "error": "Не удалось получить IGG ID после входа."}
+
+            return {"success": True, "uid": uid, "cookies": cookies_result, "username": "Игрок"}
+    except Exception as e:
+        logger.exception(f"[SHOP] ❌ Ошибка при входе по email: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        try:
+            if ctx:
+                if "page" in ctx:
+                    await ctx["page"].close()
+                if "context" in ctx:
+                    await ctx["context"].close()
+        except Exception:
+            pass
+
+
+async def start_shop_login_igg(igg_id: str) -> dict[str, Any]:
+    """
+    Запускает авторизацию по IGG ID: открывает окно и нажимает «Получить код».
+    Возвращает context/page для продолжения.
+    """
+    ctx = None
+    playwright = None
+    try:
+        from playwright.async_api import async_playwright
+        playwright = await async_playwright().start()
+        profile = get_random_browser_profile()
+        ctx = await launch_masked_persistent_context(
+            playwright,
+            user_data_dir=f"data/chrome_profiles/_shop_igg_{igg_id}",
+            headless=True,
+            slow_mo=30,
+            profile=profile,
+        )
+        context = ctx["context"]
+        page = ctx["page"]
+
+        await page.goto("https://castleclash.igg.com/shop/", wait_until="domcontentloaded", timeout=60000)
+        await _accept_cookies(page)
+
+        if not await _open_login_modal(page):
+            return {"success": False, "error": "Не удалось открыть окно авторизации."}
+
+        await _select_login_tab(page, "igg")
+
+        filled = await _fill_first_input(
+            page,
+            [
+                'input[placeholder*="IGG"]',
+                'input.passport--form-ipt',
+                'input[type="text"]',
+            ],
+            igg_id,
+        )
+        if not filled:
+            return {"success": False, "error": "Не найдено поле для IGG ID."}
+
+        code_btn = page.locator("button.passport--sub-btn:has-text('Получить код')")
+        if await code_btn.count() > 0:
+            await code_btn.first.click(timeout=5000)
+        else:
+            return {"success": False, "error": "Не удалось нажать «Получить код»."}
+
+        await page.wait_for_timeout(1500)
+
+        return {
+            "success": True,
+            "context": context,
+            "page": page,
+            "playwright": playwright,
+            "igg_id": igg_id,
+        }
+    except Exception as e:
+        logger.exception(f"[SHOP] ❌ Ошибка при входе по IGG ID: {e}")
+        try:
+            if ctx:
+                if "page" in ctx:
+                    await ctx["page"].close()
+                if "context" in ctx:
+                    await ctx["context"].close()
+            if playwright:
+                await playwright.stop()
+        except Exception:
+            pass
+        return {"success": False, "error": str(e)}
+
+
+async def complete_shop_login_igg(context, page, code: str, playwright=None) -> dict[str, Any]:
+    """
+    Завершает авторизацию по IGG ID кодом.
+    """
+    try:
+        filled = await _fill_first_input(
+            page,
+            [
+                'input.passport--password-ipt',
+                'input[placeholder*="Код"]',
+                'input[type="text"]',
+            ],
+            code,
+        )
+        if not filled:
+            return {"success": False, "error": "Не найдено поле для кода."}
+
+        login_btn = page.locator("a.passport--passport-common-btn.passport--yellow")
+        if await login_btn.count() > 0:
+            await login_btn.first.click(timeout=5000)
+        else:
+            await page.keyboard.press("Enter")
+
+        await page.wait_for_timeout(4000)
+
+        cookies_list = await context.cookies()
+        cookies_result = {c["name"]: c["value"] for c in cookies_list}
+        token = cookies_result.get("gpc_sso_token")
+        uid = jwt_get_uid(token) if token else None
+
+        return {
+            "success": bool(uid),
+            "uid": uid,
+            "cookies": cookies_result,
+            "username": "Игрок",
+            "error": None if uid else "Не удалось получить IGG ID после входа.",
+        }
+    except Exception as e:
+        logger.exception(f"[SHOP] ❌ Ошибка при подтверждении кода: {e}")
+        return {"success": False, "error": str(e)}
+    finally:
+        try:
+            await page.close()
+            await context.close()
+        except Exception:
+            pass
+        if playwright:
+            try:
+                await playwright.stop()
+            except Exception:
+                pass
 
 # ───────────────────────────────────────────────
 # 🔄 Обновление cookies через MVP (через browser_patches)
