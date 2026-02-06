@@ -24,7 +24,6 @@ from config import COOKIES_FILE
 # 🧱 Работа с cookies.json
 # ───────────────────────────────────────────────
 SLOW_MO = 50
-PAGE_LOAD_TIMEOUT = 90000
 
 
 def _get_stealth_callable():
@@ -258,8 +257,7 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                 pass
 
             logger.info("[SHOP] 🌍 Открываем страницу магазина")
-            await page.goto("https://castleclash.igg.com/shop/", wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
-            await page.wait_for_load_state("networkidle", timeout=PAGE_LOAD_TIMEOUT)
+            await page.goto("https://castleclash.igg.com/shop/", wait_until="domcontentloaded", timeout=60000)
             if await _is_access_denied(page):
                 await _capture_login_error_screenshot(page, "access_denied")
                 return {
@@ -381,8 +379,7 @@ async def start_shop_login_igg(igg_id: str) -> dict[str, Any]:
         page = ctx["page"]
 
         logger.info("[SHOP] 🌍 Открываем страницу магазина (IGG ID)")
-        await page.goto("https://castleclash.igg.com/shop/", wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
-        await page.wait_for_load_state("networkidle", timeout=PAGE_LOAD_TIMEOUT)
+        await page.goto("https://castleclash.igg.com/shop/", wait_until="domcontentloaded", timeout=60000)
         if await _is_access_denied(page):
             await _capture_login_error_screenshot(page, "access_denied")
             return {"success": False, "error": "Access Denied при открытии страницы (возможна блокировка по IP)."}
