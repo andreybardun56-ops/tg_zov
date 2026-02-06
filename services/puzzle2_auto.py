@@ -832,10 +832,10 @@ async def main():
         async with async_playwright() as p:
 
             async def run_batch(batch_accounts, allow_retry: bool, count_for_state: bool):
-                nonlocal processed_total
                 retry_accounts = []
 
                 async def worker(acc):
+                    nonlocal processed_total
                     uid = acc.get("uid")
                     if STOP_EVENT.is_set():
                         logger.info("[%s] ⏹ Остановка. Сохраняем позицию %d", uid, start_index + processed_total)
