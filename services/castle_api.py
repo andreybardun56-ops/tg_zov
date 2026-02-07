@@ -16,6 +16,7 @@ from services.browser_patches import (
     BROWSER_PATH,
     get_random_browser_profile,
     humanize_pre_action,
+    jitter,
     launch_masked_persistent_context,
 )
 from services.cookies_io import load_all_cookies, save_all_cookies
@@ -287,6 +288,17 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
         from playwright.async_api import async_playwright
         async with async_playwright() as p:
             profile = get_random_browser_profile()
+            profile.update(
+                {
+                    "user_agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 Safari/537.36"
+                    ),
+                    "locale": "ru-RU",
+                    "accept_language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+                }
+            )
             stealth_callable = _get_stealth_callable()
             logger.info("[SHOP] ▶ Запуск браузера для входа по email")
             ctx = await launch_masked_persistent_context(
@@ -301,26 +313,66 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
             context = ctx["context"]
             page = ctx["page"]
             try:
+                await context.set_extra_http_headers(
+                    {
+                        "Accept": (
+                            "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                            "image/avif,image/webp,image/apng,*/*;q=0.8"
+                        ),
+                        "Accept-Language": profile["accept_language"],
+                        "Referer": "https://castleclash.igg.com/shop/",
+                        "DNT": "1",
+                        "Upgrade-Insecure-Requests": "1",
+                    }
+                )
+            except Exception as exc:
+                logger.warning("[SHOP] Не удалось установить заголовки контекста: %s", exc)
+            try:
                 await context.clear_cookies()
             except Exception as exc:
                 logger.debug("[SHOP] Failed to clear cookies: %s", exc)
 
-            logger.info("[SHOP] 🌍 Открываем страницу магазина")
-            await page.goto("https://castleclash.igg.com/shop/", timeout=60000)
-            await _accept_cookies(page)
-            await wait_shop_ready(page)
-            if await _is_access_denied(page):
-                await _capture_login_error_screenshot(page, "access_denied")
-                return {
-                    "success": False,
-                    "error": "Access Denied при открытии страницы (возможна блокировка по IP).",
-                    "uid": None,
-                    "cookies": None,
-                    "username": None,
-                }
-            await humanize_pre_action(page)
+            login_modal_ready = False
+            for attempt in range(1, 4):
+                if attempt == 1:
+                    logger.info("[SHOP] 🌍 Открываем страницу магазина")
+                    await page.goto("https://castleclash.igg.com/shop/", timeout=60000)
+                else:
+                    logger.warning(
+                        "[SHOP] ⚠️ Окно авторизации не появилось, пробуем reload (%s/3).",
+                        attempt,
+                    )
+                    try:
+                        await page.reload(timeout=60000)
+                    except Exception as exc:
+                        logger.warning("[SHOP] Reload failed: %s", exc)
+                        await page.goto("https://castleclash.igg.com/shop/", timeout=60000)
+                await _accept_cookies(page)
+                if await _is_access_denied(page):
+                    await _capture_login_error_screenshot(page, "access_denied")
+                    return {
+                        "success": False,
+                        "error": "Access Denied при открытии страницы (возможна блокировка по IP).",
+                        "uid": None,
+                        "cookies": None,
+                        "username": None,
+                    }
+                await humanize_pre_action(page)
 
-            if not await _open_login_modal(page):
+                modal_opened = await _open_login_modal(page)
+                if modal_opened:
+                    try:
+                        await page.wait_for_selector(".passport--modal", state="visible", timeout=15000)
+                        login_modal_ready = True
+                        break
+                    except PlaywrightTimeout:
+                        logger.warning("[SHOP] ⚠️ Окно авторизации не появилось за 15 секунд.")
+                else:
+                    logger.warning("[SHOP] ⚠️ Не удалось нажать кнопку авторизации.")
+                if attempt < 3:
+                    await asyncio.sleep(jitter(1.5, 0.6))
+
+            if not login_modal_ready:
                 await _capture_login_error_screenshot(page, "open_login_modal")
                 return {
                     "success": False,
@@ -397,9 +449,13 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                 await page.keyboard.press("Enter")
 
             try:
-                await page.wait_for_load_state("networkidle", timeout=30000)
+                await page.wait_for_selector("#userBar", state="visible", timeout=30000)
             except PlaywrightTimeout:
-                pass
+                await _capture_login_error_screenshot(page, "login_failed")
+                logger.error("[SHOP] ❌ Не удалось дождаться подтверждения входа (#userBar).")
+            except Exception as exc:
+                await _capture_login_error_screenshot(page, "login_failed")
+                logger.error("[SHOP] ❌ Ошибка ожидания подтверждения входа: %s", exc)
 
             logger.info("[SHOP] 🔎 Проверяем cookies после входа")
             cookies_list = await context.cookies()
@@ -417,6 +473,12 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                 }
 
             logger.info("[SHOP] ✅ Вход успешен, UID=%s", uid)
+            try:
+                await wait_shop_ready(page)
+            except PlaywrightTimeout as exc:
+                logger.error("[SHOP] ❌ Таймаут полной загрузки магазина: %s", exc)
+            except Exception as exc:
+                logger.error("[SHOP] ❌ Ошибка ожидания полной готовности магазина: %s", exc)
             return {
                 "success": True,
                 "error": None,
