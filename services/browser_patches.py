@@ -320,6 +320,8 @@ async def launch_masked_persistent_context(
     profile: Optional[Dict[str, Any]] = None,
     stealth_callable=None,
     extra_args: Optional[List[str]] = None,
+    apply_patches: bool = True,
+    set_extra_headers: bool = True,
 ) -> Dict[str, Any]:
     """
     Удобный wrapper для запуска persistent context с маскировкой.
@@ -366,15 +368,24 @@ async def launch_masked_persistent_context(
     context = await p.chromium.launch_persistent_context(user_data_dir, **launch_kwargs)
 
     page = await context.new_page()
-    try:
-        await apply_headless_patches(context, page=page, profile=profile, stealth_callable=stealth_callable)
-    except Exception:
-        pass
+    if apply_patches:
+        try:
+            await apply_headless_patches(
+                context,
+                page=page,
+                profile=profile,
+                stealth_callable=stealth_callable,
+            )
+        except Exception:
+            pass
 
-    try:
-        await context.set_extra_http_headers({"Accept-Language": profile.get("accept_language", "en-US,en")})
-    except Exception:
-        pass
+    if set_extra_headers:
+        try:
+            await context.set_extra_http_headers(
+                {"Accept-Language": profile.get("accept_language", "en-US,en")}
+            )
+        except Exception:
+            pass
 
     return {"context": context, "page": page, "profile": profile}
 

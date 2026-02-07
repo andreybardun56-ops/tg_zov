@@ -2,8 +2,6 @@
 
 import asyncio
 import base64
-import importlib
-import importlib.util
 import json
 import os
 import re
@@ -39,13 +37,6 @@ class PlayerInfoResult(TypedDict):
     uid: str | None
     username: str | None
 
-
-def _get_stealth_callable():
-    spec = importlib.util.find_spec("playwright_stealth")
-    if spec is None:
-        return None
-    module = importlib.import_module("playwright_stealth")
-    return getattr(module, "stealth_async", None) or getattr(module, "stealth", None)
 
 def load_cookies_for_account(user_id: str, uid: str) -> dict:
     """Возвращает cookies конкретного аккаунта из cookies.json"""
@@ -127,60 +118,98 @@ async def _accept_cookies(page: Page) -> None:
             logger.debug("[SHOP] Cookies banner click failed (%s): %s", selector, exc)
 
 
-async def wait_shop_ready(page: Page, timeout: int = 60000) -> None:
+SHOP_READY_SELECTORS = [
+    "div.btn-login.login__btn.before-login:has-text('Авторизация')",
+    "div.userbar .btn-login.login__btn.before-login",
+    ".main .userbar .btn-login.login__btn.before-login",
+    ".passport--modal",
+    ".userbar",
+    "#userBar",
+]
+
+MVP_READY_SELECTOR = ".user__infos-item"
+
+
+async def wait_shop_ready(page: Page, timeout: int = 60000, attempts: int = 2) -> None:
     deadline = time.monotonic() + (timeout / 1000)
     def _remaining_ms() -> int:
         return int(max(0, (deadline - time.monotonic()) * 1000))
 
-    try:
-        remaining_ms = min(15000, _remaining_ms())
-        if remaining_ms > 0:
-            await page.wait_for_load_state("domcontentloaded", timeout=remaining_ms)
-    except PlaywrightTimeout:
-        pass
-    except Exception as exc:
-        logger.debug("[SHOP] domcontentloaded wait failed: %s", exc)
-
-    try:
-        remaining_ms = min(15000, _remaining_ms())
-        if remaining_ms > 0:
-            await page.wait_for_load_state("networkidle", timeout=remaining_ms)
-    except PlaywrightTimeout:
-        pass
-    except Exception as exc:
-        logger.debug("[SHOP] networkidle wait failed: %s", exc)
-
-    url = (page.url or "").lower()
-    selectors = (
-        [
-            ".user__infos-item",
-            ".user__infos",
-        ]
-        if "mvp" in url
-        else [
-            "div.btn-login.login__btn.before-login:has-text('Авторизация')",
-            "div.userbar .btn-login.login__btn.before-login",
-            ".main .userbar .btn-login.login__btn.before-login",
-            ".passport--modal",
-            ".userbar",
-        ]
-    )
-
-    for selector in selectors:
-        remaining_ms = _remaining_ms()
-        if remaining_ms <= 0:
-            logger.warning("[SHOP] Page readiness timeout exceeded.")
-            raise PlaywrightTimeout("Shop readiness timeout exceeded.")
+    for attempt in range(1, attempts + 1):
         try:
-            await page.wait_for_selector(selector, state="visible", timeout=remaining_ms)
-            return
+            remaining_ms = min(15000, _remaining_ms())
+            if remaining_ms > 0:
+                await page.wait_for_load_state("domcontentloaded", timeout=remaining_ms)
         except PlaywrightTimeout:
-            continue
+            pass
         except Exception as exc:
-            logger.debug("[SHOP] Wait selector failed (%s): %s", selector, exc)
+            logger.debug("[SHOP] domcontentloaded wait failed: %s", exc)
+
+        try:
+            remaining_ms = min(12000, _remaining_ms())
+            if remaining_ms > 0:
+                await page.wait_for_load_state("networkidle", timeout=remaining_ms)
+        except PlaywrightTimeout:
+            pass
+        except Exception as exc:
+            logger.debug("[SHOP] networkidle wait failed: %s", exc)
+
+        for selector in SHOP_READY_SELECTORS:
+            remaining_ms = _remaining_ms()
+            if remaining_ms <= 0:
+                logger.warning("[SHOP] Page readiness timeout exceeded.")
+                raise PlaywrightTimeout("Shop readiness timeout exceeded.")
+            try:
+                await page.wait_for_selector(selector, state="visible", timeout=remaining_ms)
+                return
+            except PlaywrightTimeout:
+                continue
+            except Exception as exc:
+                logger.debug("[SHOP] Wait selector failed (%s): %s", selector, exc)
+
+        if attempt < attempts:
+            logger.warning("[SHOP] ⚠️ Готовность магазина не подтверждена, попытка %s/%s.", attempt, attempts)
+            await asyncio.sleep(jitter(1.0, 0.5))
 
     logger.warning("[SHOP] No readiness selector appeared within timeout.")
     raise PlaywrightTimeout("Shop readiness selector not found within timeout.")
+
+
+async def wait_mvp_ready(page: Page, timeout: int = 60000) -> None:
+    try:
+        await page.wait_for_selector(MVP_READY_SELECTOR, state="visible", timeout=timeout)
+    except PlaywrightTimeout:
+        logger.warning("[MVP] MVP readiness timeout exceeded.")
+        raise
+    except Exception as exc:
+        logger.debug("[MVP] MVP readiness wait failed: %s", exc)
+        raise
+
+
+async def open_shop_page_with_retry(page: Page, url: str, attempts: int = 3) -> None:
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            if attempt == 1:
+                logger.info("[SHOP] 🌍 Открываем страницу магазина")
+                await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            else:
+                logger.warning("[SHOP] ⚠️ Повтор загрузки магазина (%s/%s).", attempt, attempts)
+                try:
+                    await page.reload(wait_until="domcontentloaded", timeout=60000)
+                except Exception:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            await _accept_cookies(page)
+            await wait_shop_ready(page)
+            return
+        except Exception as exc:
+            last_error = exc
+            if attempt < attempts:
+                await asyncio.sleep(jitter(1.5, 0.6))
+            else:
+                break
+    if last_error:
+        raise last_error
 
 
 async def _open_login_modal(page: Page) -> bool:
@@ -299,7 +328,6 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                     "accept_language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
                 }
             )
-            stealth_callable = _get_stealth_callable()
             logger.info("[SHOP] ▶ Запуск браузера для входа по email")
             ctx = await launch_masked_persistent_context(
                 p,
@@ -308,57 +336,25 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                 headless=True,
                 slow_mo=SLOW_MO,
                 profile=profile,
-                stealth_callable=stealth_callable,
+                apply_patches=False,
+                set_extra_headers=False,
             )
             context = ctx["context"]
             page = ctx["page"]
-            try:
-                await context.set_extra_http_headers(
-                    {
-                        "Accept": (
-                            "text/html,application/xhtml+xml,application/xml;q=0.9,"
-                            "image/avif,image/webp,image/apng,*/*;q=0.8"
-                        ),
-                        "Accept-Language": profile["accept_language"],
-                        "Referer": "https://castleclash.igg.com/shop/",
-                        "DNT": "1",
-                        "Upgrade-Insecure-Requests": "1",
-                    }
-                )
-            except Exception as exc:
-                logger.warning("[SHOP] Не удалось установить заголовки контекста: %s", exc)
-            try:
-                await context.clear_cookies()
-            except Exception as exc:
-                logger.debug("[SHOP] Failed to clear cookies: %s", exc)
+            await open_shop_page_with_retry(page, "https://castleclash.igg.com/shop/")
+            if await _is_access_denied(page):
+                await _capture_login_error_screenshot(page, "access_denied")
+                return {
+                    "success": False,
+                    "error": "Access Denied при открытии страницы (возможна блокировка по IP).",
+                    "uid": None,
+                    "cookies": None,
+                    "username": None,
+                }
+            await humanize_pre_action(page)
 
             login_modal_ready = False
-            for attempt in range(1, 4):
-                if attempt == 1:
-                    logger.info("[SHOP] 🌍 Открываем страницу магазина")
-                    await page.goto("https://castleclash.igg.com/shop/", timeout=60000)
-                else:
-                    logger.warning(
-                        "[SHOP] ⚠️ Окно авторизации не появилось, пробуем reload (%s/3).",
-                        attempt,
-                    )
-                    try:
-                        await page.reload(timeout=60000)
-                    except Exception as exc:
-                        logger.warning("[SHOP] Reload failed: %s", exc)
-                        await page.goto("https://castleclash.igg.com/shop/", timeout=60000)
-                await _accept_cookies(page)
-                if await _is_access_denied(page):
-                    await _capture_login_error_screenshot(page, "access_denied")
-                    return {
-                        "success": False,
-                        "error": "Access Denied при открытии страницы (возможна блокировка по IP).",
-                        "uid": None,
-                        "cookies": None,
-                        "username": None,
-                    }
-                await humanize_pre_action(page)
-
+            for attempt in range(1, 3):
                 modal_opened = await _open_login_modal(page)
                 if modal_opened:
                     try:
@@ -369,8 +365,9 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                         logger.warning("[SHOP] ⚠️ Окно авторизации не появилось за 15 секунд.")
                 else:
                     logger.warning("[SHOP] ⚠️ Не удалось нажать кнопку авторизации.")
-                if attempt < 3:
-                    await asyncio.sleep(jitter(1.5, 0.6))
+                if attempt < 2:
+                    await page.reload(wait_until="domcontentloaded", timeout=60000)
+                    await _accept_cookies(page)
 
             if not login_modal_ready:
                 await _capture_login_error_screenshot(page, "open_login_modal")
@@ -527,7 +524,6 @@ async def start_shop_login_igg(igg_id: str) -> dict[str, Any]:
         from playwright.async_api import async_playwright
         playwright = await async_playwright().start()
         profile = get_random_browser_profile()
-        stealth_callable = _get_stealth_callable()
         logger.info("[SHOP] ▶ Запуск браузера для входа по IGG ID")
         ctx = await launch_masked_persistent_context(
             playwright,
@@ -536,15 +532,14 @@ async def start_shop_login_igg(igg_id: str) -> dict[str, Any]:
             headless=True,
             slow_mo=SLOW_MO,
             profile=profile,
-            stealth_callable=stealth_callable,
+            apply_patches=False,
+            set_extra_headers=False,
         )
         context = ctx["context"]
         page = ctx["page"]
 
         logger.info("[SHOP] 🌍 Открываем страницу магазина (IGG ID)")
-        await page.goto("https://castleclash.igg.com/shop/", timeout=60000)
-        await _accept_cookies(page)
-        await wait_shop_ready(page)
+        await open_shop_page_with_retry(page, "https://castleclash.igg.com/shop/")
         if await _is_access_denied(page):
             await _capture_login_error_screenshot(page, "access_denied")
             await _cleanup()
@@ -742,7 +737,6 @@ async def refresh_cookies_mvp(user_id: str, uid: str) -> dict[str, Any]:
         from playwright.async_api import async_playwright
         async with async_playwright() as p:
             profile = get_random_browser_profile()
-            stealth_callable = _get_stealth_callable()
             ctx = await launch_masked_persistent_context(
                 p,
                 user_data_dir=f"data/chrome_profiles/{uid}",
@@ -750,15 +744,16 @@ async def refresh_cookies_mvp(user_id: str, uid: str) -> dict[str, Any]:
                 headless=True,
                 slow_mo=SLOW_MO,
                 profile=profile,
-                stealth_callable=stealth_callable,
+                apply_patches=False,
+                set_extra_headers=False,
             )
 
             context = ctx["context"]
             page = ctx["page"]
 
-            await page.goto(mvp_url, timeout=60000)
+            await page.goto(mvp_url, wait_until="domcontentloaded", timeout=60000)
             await _accept_cookies(page)
-            await wait_shop_ready(page)
+            await wait_mvp_ready(page)
             logger.info("[COOKIES] 🌍 Открыта страница MVP")
             await humanize_pre_action(page)
 
@@ -849,7 +844,6 @@ async def extract_player_info_from_page(url: str) -> PlayerInfoResult:
     try:
         async with async_playwright() as p:
             profile = get_random_browser_profile()
-            stealth_callable = _get_stealth_callable()
             ctx = await launch_masked_persistent_context(
                 p,
                 user_data_dir="data/chrome_profiles/_extract_tmp",
@@ -857,14 +851,15 @@ async def extract_player_info_from_page(url: str) -> PlayerInfoResult:
                 headless=True,
                 slow_mo=SLOW_MO,
                 profile=profile,
-                stealth_callable=stealth_callable,
+                apply_patches=False,
+                set_extra_headers=False,
             )
             context = ctx["context"]
             page = ctx["page"]
 
-            await page.goto(url, timeout=60000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
             await _accept_cookies(page)
-            await wait_shop_ready(page)
+            await wait_mvp_ready(page)
             logger.info("[MVP] ⏳ Ожидание загрузки страницы...")
             await humanize_pre_action(page)
 
