@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Any, TypedDict
 from playwright.async_api import (
     BrowserContext,
+    Locator,
     Page,
     Playwright,
     TimeoutError as PlaywrightTimeout,
@@ -315,14 +316,7 @@ async def _clear_page_storage(page: Page) -> None:
         logger.debug("[SHOP] Storage clear failed: %s", exc)
 
 
-async def _click_login_button(page: Page, locator: Locator) -> bool:
-    try:
-        if await locator.count() == 0:
-            return False
-    except Exception as exc:
-        logger.debug("[SHOP] Login button lookup failed: %s", exc)
-        return False
-
+async def _click_login_button(page: Page, selectors: list[str]) -> bool:
     try:
         await page.locator(".passport--container-outer").wait_for(state="hidden", timeout=3000)
     except PlaywrightTimeout:
@@ -330,31 +324,46 @@ async def _click_login_button(page: Page, locator: Locator) -> bool:
     except Exception as exc:
         logger.debug("[SHOP] Login overlay wait failed: %s", exc)
 
-    try:
-        await locator.first.click(timeout=5000)
-        return True
-    except PlaywrightTimeout as exc:
-        logger.warning("[SHOP] Login click timeout, trying fallback: %s", exc)
-    except Exception as exc:
-        logger.warning("[SHOP] Login click failed, trying fallback: %s", exc)
+    for selector in selectors:
+        contexts = [page, *page.frames]
+        for ctx in contexts:
+            try:
+                locator: Locator = ctx.locator(selector)
+                if await locator.count() == 0:
+                    continue
+                await locator.first.scroll_into_view_if_needed(timeout=3000)
+                if hasattr(locator, "is_enabled") and not await locator.first.is_enabled():
+                    try:
+                        await locator.first.wait_for(state="visible", timeout=3000)
+                    except PlaywrightTimeout:
+                        pass
+                try:
+                    await locator.first.click(timeout=5000)
+                    return True
+                except PlaywrightTimeout as exc:
+                    logger.warning("[SHOP] Login click timeout (%s), trying fallback: %s", selector, exc)
+                except Exception as exc:
+                    logger.warning("[SHOP] Login click failed (%s), trying fallback: %s", selector, exc)
 
-    try:
-        await _close_passport_frame(page)
-    except Exception as exc:
-        logger.debug("[SHOP] Login click fallback close failed: %s", exc)
+                try:
+                    await _close_passport_frame(page)
+                except Exception as exc:
+                    logger.debug("[SHOP] Login click fallback close failed: %s", exc)
 
-    try:
-        await locator.first.click(timeout=5000, force=True)
-        return True
-    except Exception as exc:
-        logger.debug("[SHOP] Forced login click failed: %s", exc)
+                try:
+                    await locator.first.click(timeout=5000, force=True)
+                    return True
+                except Exception as exc:
+                    logger.debug("[SHOP] Forced login click failed (%s): %s", selector, exc)
 
-    try:
-        await page.evaluate("(el) => el.click()", await locator.first.element_handle())
-        return True
-    except Exception as exc:
-        logger.debug("[SHOP] JS login click failed: %s", exc)
-        return False
+                try:
+                    await page.evaluate("(el) => el.click()", await locator.first.element_handle())
+                    return True
+                except Exception as exc:
+                    logger.debug("[SHOP] JS login click failed (%s): %s", selector, exc)
+            except Exception as exc:
+                logger.debug("[SHOP] Login button lookup failed (%s): %s", selector, exc)
+    return False
 
 
 async def _close_passport_frame(page: Page) -> None:
