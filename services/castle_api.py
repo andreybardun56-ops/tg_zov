@@ -317,6 +317,13 @@ async def _clear_page_storage(page: Page) -> None:
 
 
 async def _click_login_button(page: Page, selectors: list[str]) -> bool:
+    try:
+        await page.locator(".passport--container-outer").wait_for(state="hidden", timeout=3000)
+    except PlaywrightTimeout:
+        pass
+    except Exception as exc:
+        logger.debug("[SHOP] Login overlay wait failed: %s", exc)
+
     for selector in selectors:
         contexts = [page, *page.frames]
         for ctx in contexts:
@@ -337,6 +344,11 @@ async def _click_login_button(page: Page, selectors: list[str]) -> bool:
                     logger.warning("[SHOP] Login click timeout (%s), trying fallback: %s", selector, exc)
                 except Exception as exc:
                     logger.warning("[SHOP] Login click failed (%s), trying fallback: %s", selector, exc)
+
+                try:
+                    await _close_passport_frame(page)
+                except Exception as exc:
+                    logger.debug("[SHOP] Login click fallback close failed: %s", exc)
 
                 try:
                     await locator.first.click(timeout=5000, force=True)
