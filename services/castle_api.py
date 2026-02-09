@@ -303,13 +303,6 @@ async def _fill_first_input(page: Page, selectors: list[str], value: str) -> boo
     return False
 
 
-async def _clear_page_storage(page: Page) -> None:
-    try:
-        await page.evaluate("() => { localStorage.clear(); sessionStorage.clear(); }")
-    except Exception as exc:
-        logger.debug("[SHOP] Storage clear failed: %s", exc)
-
-
 async def _close_passport_frame(page: Page) -> None:
     selectors = [
         "#component_passport .passport--frame-close",
@@ -480,10 +473,7 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
             except Exception as exc:
                 logger.debug("[SHOP] Cookie clear failed before login: %s", exc)
             await open_shop_page_with_retry(page, "https://castleclash.igg.com/shop/")
-            if "_clear_page_storage" in globals():
-                await _clear_page_storage(page)
-            else:
-                logger.warning("[SHOP] Storage clear helper missing; skipping.")
+            await _clear_page_storage(page)
             await _accept_cookies(page)
             if await _is_access_denied(page):
                 await _capture_login_error_screenshot(page, "access_denied")
@@ -691,10 +681,7 @@ async def start_shop_login_igg(igg_id: str) -> dict[str, Any]:
 
         logger.info("[SHOP] 🌍 Открываем страницу магазина (IGG ID)")
         await open_shop_page_with_retry(page, "https://castleclash.igg.com/shop/")
-        if "_clear_page_storage" in globals():
-            await _clear_page_storage(page)
-        else:
-            logger.warning("[SHOP] Storage clear helper missing; skipping.")
+        await _clear_page_storage(page)
         await _accept_cookies(page)
         if await _is_access_denied(page):
             await _capture_login_error_screenshot(page, "access_denied")
