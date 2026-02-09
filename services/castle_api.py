@@ -772,6 +772,8 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                     "cookies": None,
                     "username": None,
                 }
+            await page.wait_for_timeout(7000)
+            await _capture_login_error_screenshot(page, "after_login_click_delay")
 
             login_success = await _wait_for_login_success(page, context, timeout_ms=30000)
             if not login_success:
