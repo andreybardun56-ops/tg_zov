@@ -102,7 +102,15 @@ def find_donor_for_puzzle_exclude(puzzle_num: int, exclude_iggids: set) -> Optio
 
 
 # ---------------- main logic ----------------
-async def claim_puzzle(tg_user_id: str, target_iggid: str, puzzle_num: int, bot, msg=None) -> None:
+async def claim_puzzle(
+    tg_user_id: str,
+    target_iggid: str,
+    puzzle_num: int,
+    bot,
+    msg=None,
+    user_name: str | None = None,
+    user_tag: str | None = None,
+) -> None:
     tg_user_id = str(tg_user_id)
     logger.info(f"[PUZZLE_CLAIM] 🔍 Поиск пазла {puzzle_num} для user={tg_user_id}")
 
@@ -126,11 +134,19 @@ async def claim_puzzle(tg_user_id: str, target_iggid: str, puzzle_num: int, bot,
         os.replace(tmp, CLAIM_LOG_FILE)
 
     log_data = load_claim_log()
+    users_meta = log_data.setdefault("users_meta", {})
+    if user_name or user_tag:
+        users_meta[str(tg_user_id)] = {
+            "name": user_name or users_meta.get(str(tg_user_id), {}).get("name", ""),
+            "tag": user_tag or users_meta.get(str(tg_user_id), {}).get("tag", ""),
+        }
 
     # ===== Проверка лимитов и повторов =====
     user_entry = log_data.setdefault("users", {}).setdefault(tg_user_id, {}).setdefault(
         target_iggid, {"donors": [], "count": 0, "claimed_puzzles": [], "last_messages": {}}
     )
+    if user_name or user_tag:
+        save_claim_log(log_data)
 
     # если достигнут лимит 30 пазлов
     if user_entry["count"] >= 30:

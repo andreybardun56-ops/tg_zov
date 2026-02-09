@@ -89,11 +89,8 @@ DELAY_BETWEEN_ACCOUNTS = 3  # Пауза (в секундах) между ста
 DELAY_BETWEEN_LOTTERY = 1.5  # Промежуток между запросами lottery
 
 # === Настройки батчей ===
-BATCH_SIZE = 20  # после этого числа аккаунтов данные будут сохраняться
 BATCH_RETRY_SIZE = 100  # батч для повторной обработки 403
 # ---------------- глобальные переменные ----------------
-puzzle_batch = []  # текущий батч для сохранения
-processed_count = 0  # количество обработанных аккаунтов
 puzzle_lock = asyncio.Lock()  # для безопасного доступа к батчу в async
 
 accounts_with_attempts: List[Dict[str, Any]] = []
@@ -330,66 +327,6 @@ def jitter(base: float, variance: float = 0.5):
     return max(0.1, base + delta)
 
 
-def calculate_puzzle_totals(file_path: Path, accounts_processed: int = None):
-    """Считает общее количество каждого пазла (1–9) по всем аккаунтам (только дубликаты)."""
-    totals = {str(i): 0 for i in range(1, 10)}
-    count_accounts = 0
-
-    if not file_path.exists():
-        logger.warning("Файл %s не найден для подсчёта пазлов", file_path)
-        return totals
-
-    with open(file_path, "r", encoding="utf-8") as f:
-        buffer = ""
-        for line in f:
-            if line.strip():
-                buffer += line
-            else:
-                if buffer.strip():
-                    try:
-                        data = json.loads(buffer)
-                        puzzle_data = data.get("puzzle", {})
-                        for pid, count in puzzle_data.items():
-                            if pid in totals:
-                                totals[pid] += int(count)
-                        count_accounts += 1
-                    except Exception:
-                        pass
-                    buffer = ""
-        if buffer.strip():
-            try:
-                data = json.loads(buffer)
-                puzzle_data = data.get("puzzle", {})
-                for pid, count in puzzle_data.items():
-                    if pid in totals:
-                        totals[pid] += int(count)
-                count_accounts += 1
-            except Exception:
-                pass
-
-    total_sum = sum(totals.values())
-    # logger.info("=== 🧩 Итоги по пазлам (только дубликаты) ===")
-    # for pid, cnt in totals.items():
-    # logger.info(f"Пазл {pid}: {cnt} шт.")
-    # logger.info("=========================")
-    # logger.info(f"Всего дубликатов: {total_sum}")
-    # if accounts_processed is not None:
-    # logger.info(f"🔢 Аккаунтов обработано: {accounts_processed}")
-    # else:
-    # logger.info(f"🔢 Аккаунтов с дубликатами: {count_accounts}")
-
-    summary_path = Path("data/puzzle_summary.json")
-    with open(summary_path, "w", encoding="utf-8") as out:
-        json.dump({
-            "totals": totals,
-            "accounts": count_accounts,
-            "all_duplicates": total_sum,
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }, out, ensure_ascii=False, indent=2)
-
-    return totals
-
-
 # ---------------- per-account workflow ----------------
 def is_403_response(status: int, text: str) -> bool:
     if status == 403:
@@ -407,8 +344,6 @@ async def process_account(account: Dict[str, Any], p) -> bool:
     start_time = time.perf_counter()
 
     try:
-        # logger.info("[%s] → старт обработки (mail=%s)", uid, mail)
-
         # 1 / 3 / 4 — профиль + параметры при создании контекста
         profile = get_random_browser_profile()
         ua = profile["user_agent"]
@@ -453,7 +388,6 @@ async def process_account(account: Dict[str, Any], p) -> bool:
         if BROWSER_PATH:
             launch_kwargs["executable_path"] = BROWSER_PATH
 
-        # logger.info("[%s] 🕶 Запуск браузера в фоновом режиме (headless masked)", uid)
         context = await p.chromium.launch_persistent_context(user_data_dir, **launch_kwargs)
 
         # === Маскировка headless через JS ===
@@ -477,7 +411,6 @@ async def process_account(account: Dict[str, Any], p) -> bool:
 
             await context.add_init_script(patch_script)
 
-            # logger.info("[%s] 🧩 Headless patch активирован", uid)
         except Exception as e:
             logger.warning("[%s] ⚠️ Ошибка headless patch: %s", uid, e)
 
@@ -639,147 +572,7 @@ async def process_account(account: Dict[str, Any], p) -> bool:
                 pass
         except Exception as e:
             logger.warning(f"[{uid}] ⚠️ Ошибка lottery-запроса: {e}")
-
-            # Имитируем активность пользователя перед следующими действиями
-    #            await humanize_pre_action(page)
-    #            await asyncio.sleep(1.5 + random.random() * 2.0)
-
-    # Проверяем куки перед get_resource
-    #
-    #                cookies_before = await context.cookies("https://event-eu-cc.igg.com/")
-    #                cookie_names = [c.get("name") for c in cookies_before] if cookies_before else []
-    #            except Exception:
-    #                pass
-
-    #            # === get_resource ===
-    #            await asyncio.sleep(jitter(1.5, variance=1.0))  # пауза 0.5–3 сек
-    #            await humanize_pre_action(page)
-    #            await asyncio.sleep(1.0 + random.random() * 2.0)
-
-    #            # 🔄 Основной запрос через JS в контексте страницы
-    #            js_code = f"""
-    #                async () => {{
-    #                    const res = await fetch('{base}?action=get_resource', {{
-    #                        method: 'POST',
-    #                       credentials: 'include',
-    #                       headers: {{
-    #                           'X-Requested-With': 'XMLHttpRequest',
-    #                           'Accept': 'application/json, text/javascript, */*; q=0.01',
-    #                           'Referer': 'https://event-eu-cc.igg.com/event/puzzle2/'
-    #                        }}
-    #                    }});
-    #                    return await res.text();
-    #                }}
-    #            """
-    #            async def fetch_get_resource():
-    #                return await page.evaluate(js_code)
-
-    #            text = await fetch_get_resource()
-
-    # 💾 сохраняем ответ для отладки
-    # raw_path = FAIL_DIR / f"{uid}_get_resource_raw.txt"
-    # raw_path.write_text(text, encoding="utf-8")
-    # logger.info("[%s] 💾 Ответ get_resource сохранён в %s", uid, raw_path)
-
-    # Проверяем — JSON ли это
-    #            if not text.strip().startswith("{"):
-    # debug_path = FAIL_DIR / f"{uid}_get_resource_response.html"
-    # debug_path.write_text(text, encoding="utf-8")
-    #                logger.error("[%s] ⚠️ get_resource: сервер вернул HTML, сохранено в %s", uid,)
-    #            else:
-    #                # ✅ Парсим JSON
-    #                data = json.loads(text)
-    #                data_section = data.get("data", {})
-
-    #                if isinstance(data_section, list) and data_section:
-    #                    user = data_section[0].get("user", {})
-    #                elif isinstance(data_section, dict):
-    #                    user = data_section.get("user", {})
-    #                else:
-    #                    user = {}
-
-    # ec_free
-    #                ec_free = user.get("ec_free", "0")
-    #                try:
-    #                    ec_free_int = int(ec_free)
-    #                except Exception:
-    #                    ec_free_int = 0
-
-    #                if ec_free_int > 0:
-    #                    accounts_with_attempts.append(account)
-    #
-    #                # puzzle
-    #                puzzle_data = {}
-    #                extra_info = user.get("extra_info")
-    #                if isinstance(extra_info, dict):
-    #                    puzzle_data = extra_info.get("puzzle", {})
-    #                else:
-    #                    ec_extra = user.get("ec_extra_info", "{}")
-    #                    try:
-    #                        ec_extra_json = json.loads(ec_extra)
-    #                        puzzle_data = ec_extra_json.get("puzzle", {})
-    #                    except Exception:
-    #                        puzzle_data = {}
-
-    #               puzzle_data = {str(k): v for k, v in puzzle_data.items()}
-
-    #                # ✅ ЭТОТ ЛОГ ТЕПЕРЬ БУДЕТ ПИСАТЬСЯ В ФАЙЛ
-    #                logger.info("[%s] 🧩 Попытки: %s | Пазлы: %s", uid, ec_free, puzzle_data)
-
-    # --- формируем entry для батча ---
-    #               entry = None
-    #                if user and puzzle_data:
-    #                    entry = {
-    #                        "iggid": user.get("iggid"),
-    #                        "ec_param": user.get("ec_param"),
-    #                        "puzzle": puzzle_data,
-    #                        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    #                   }
-
-    #                if entry:
-    #                    global puzzle_batch, processed_count
-    #                    async with puzzle_lock:
-    #                        puzzle_batch.append(entry)
-    #                        processed_count += 1
-    #
-    #                        # --- батчинг: каждые BATCH_SIZE аккаунтов ---
-    #                        if processed_count % BATCH_SIZE == 0:
-    #                            logger.info(f"💾 Пройдено {processed_count} аккаунтов — сохраняем batch")
-    #                            for e in puzzle_batch:
-    #                                duplicates = {}
-    #                                for pid, count in e["puzzle"].items():
-    #                                    try:
-    #                                        if int(count) >= 2:
-    #                                            duplicates[pid] = int(count) - 1
-    #                                    except Exception:
-    #                                        continue
-    #                                if duplicates:
-    #                                    e_to_save = e.copy()
-    #                                    e_to_save["puzzle"] = duplicates
-    #                                    save_puzzle_data(e_to_save, DATA_FILE)
-    #                            puzzle_batch.clear()  # очищаем батч после сохранения
-
-    #                    try:
-    #                        calculate_puzzle_totals(DATA_FILE, accounts_processed=processed_count)
-    #                    except Exception as e:
-    #                        logger.warning(f"⚠️ Не удалось обновить puzzle_summary.json: {e}")
-
-    #                    puzzle_batch.clear()
-
-    #        except Exception as e:
-    # 9 — сохраняем артефакты и при общей ошибке
-    #            try:
-    #                if page:
-    #                    await page.screenshot(path=str(FAIL_DIR / f"{uid}_exception.png"))
-    #                    html = await page.content()
-    #                    (FAIL_DIR / f"{uid}_exception.html").write_text(html, encoding="utf-8")
-    #            except Exception:
-    #                pass
-    #            logger.error("[%s] ❌ Общая ошибка: %s", uid, e)
     finally:
-        # duration = round(time.perf_counter() - start_time, 2)
-        # logger.info("[%s] ⏱ Завершено за %s сек.", uid, duration)
-
         # 🔒 Корректно закрываем page и context
         try:
             if page:
@@ -794,7 +587,6 @@ async def process_account(account: Dict[str, Any], p) -> bool:
             user_data_dir_path = PROFILE_BASE_DIR / f"{uid}"
             if user_data_dir_path.exists():
                 shutil.rmtree(user_data_dir_path, ignore_errors=True)
-                # logger.info("[%s] 🧹 Папка профиля удалена: %s", uid, user_data_dir_path)
         except Exception as e:
             logger.warning("[%s] ⚠️ Не удалось удалить профиль: %s", uid, e)
 
@@ -882,21 +674,6 @@ async def main():
                 retry_accounts = await run_batch(batch, allow_retry=True, count_for_state=True)
                 if retry_accounts and not STOP_EVENT.is_set():
                     await run_batch(retry_accounts, allow_retry=False, count_for_state=False)
-
-        # сохраняем остатки батча
-        async with puzzle_lock:
-            if puzzle_batch:
-                logger.info(f"💾 Сохраняем остаток данных: {len(puzzle_batch)} аккаунтов")
-                for e in puzzle_batch:
-                    save_puzzle_data(e, DATA_FILE)
-                puzzle_batch.clear()
-
-        # итоговый подсчёт
-        try:
-            calculate_puzzle_totals(DATA_FILE, accounts_processed=stats["success"])
-            logger.info("🧮 Итоговый подсчёт пазлов выполнен успешно")
-        except Exception as e:
-            logger.warning("⚠️ Не удалось пересчитать итоговые пазлы: %s", e)
 
         total_time = round(time.perf_counter() - start_time, 2)
         logger.info("=== ✅ Итог ===")

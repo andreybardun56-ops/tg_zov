@@ -9,25 +9,16 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # ============================ ♻️ ОБМЕН ПАЗЛОВ ============================
 
-# --- Конфигурация предметов обмена ---
-EXCHANGE_ITEMS = {
-    "37305": ("📚 20 книг опыта", 20, 1, "https://img1.igg.com/1030/res/2017/07/16/211400_9899.png"),
-    "37306": ("💎 2 мешка выбора ресурсов I", 2, 1, "https://img1.igg.com/1030/res/2020/12/09/213600_9572.png"),
-    "37307": ("🪙 20 сундуков облика зданий I", 20, 1, "https://img1.igg.com/1030/res/2019/10/23/031136_2131.png"),
-    "37309": ("🧱 10 пыльцы", 10, 2, "https://img1.igg.com/1030/res/2019/06/20/050839_6991.png"),
-    "37310": ("🎟️ 4 сундука VI", 4, 2, "https://img1.igg.com/1030/res/2019/02/25/032732_3374.png"),
-    "37311": ("⚙️ 4 сундука V", 4, 2, "https://img1.igg.com/1030/res/2018/12/20/043132_5843.png"),
-    "37312": ("🧩 4 мешок выбора осколков эпич. героя III", 4, 5, "https://img1.igg.com/game/1030/res/2022/07/15/003556_62d0fcbc8315f2236.png"),
-    "37313": ("🎁 4 мешок выбора рудиментов эпич. героев III", 4, 5, "https://img1.igg.com/game/1030/res/2022/07/15/003537_62d0fca95492c1184.png"),
-    "43382": ("🏆 4 мешок выбора обликов эпич. героя III", 4, 5, "https://img1.igg.com/game/1030/res/2022/07/15/003634_62d0fce2c9e2e2635.png"),
-}
-
-async def send_exchange_items(bot: Bot, user_id: int, uid: str):
+async def send_exchange_items(bot: Bot, user_id: int, uid: str, items: dict):
     """
     Отправляет карточки обмена (мини-витрину) пользователю:
     🖼 Фото + описание + кнопка "♻️ Обменять"
     """
-    for item_id, (title, amount, need, img_url) in EXCHANGE_ITEMS.items():
+    for item_id, item in items.items():
+        title = item.get("title", f"ID {item_id}")
+        amount = item.get("amount", 1)
+        need = item.get("need", 1)
+        img_url = item.get("img", "")
         caption = (
             f"<b>{title}</b>\n"
             f"💠 Получите: <b>{amount}</b>\n"
@@ -46,7 +37,7 @@ async def send_exchange_items(bot: Bot, user_id: int, uid: str):
         try:
             await bot.send_photo(
                 chat_id=user_id,
-                photo=img_url,
+                photo=img_url or "https://img1.igg.com/1030/res/2017/07/16/211400_9899.png",
                 caption=caption,
                 reply_markup=kb,
                 parse_mode="HTML"
