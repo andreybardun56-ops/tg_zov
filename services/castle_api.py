@@ -138,6 +138,13 @@ async def wait_shop_ready(page: Page, timeout: int = 60000, attempts: int = 2) -
     def _remaining_ms() -> int:
         return int(max(0, (deadline - time.monotonic()) * 1000))
 
+    async def _has_userbar() -> bool:
+        try:
+            return await page.locator("#userBar, .userbar").count() > 0
+        except Exception as exc:
+            logger.debug("[SHOP] Userbar presence check failed: %s", exc)
+            return False
+
     for attempt in range(1, attempts + 1):
         try:
             remaining_ms = min(15000, _remaining_ms())
@@ -160,6 +167,9 @@ async def wait_shop_ready(page: Page, timeout: int = 60000, attempts: int = 2) -
         for selector in SHOP_READY_SELECTORS:
             remaining_ms = _remaining_ms()
             if remaining_ms <= 0:
+                if await _has_userbar():
+                    logger.info("[SHOP] Userbar present despite readiness timeout.")
+                    return
                 logger.warning("[SHOP] Page readiness timeout exceeded.")
                 raise PlaywrightTimeout("Shop readiness timeout exceeded.")
             try:
@@ -171,6 +181,9 @@ async def wait_shop_ready(page: Page, timeout: int = 60000, attempts: int = 2) -
                 logger.debug("[SHOP] Wait selector failed (%s): %s", selector, exc)
 
         if attempt < attempts:
+            if await _has_userbar():
+                logger.info("[SHOP] Userbar present after readiness attempts.")
+                return
             logger.warning("[SHOP] ⚠️ Готовность магазина не подтверждена, попытка %s/%s.", attempt, attempts)
             await asyncio.sleep(jitter(1.0, 0.5))
 
@@ -207,6 +220,7 @@ async def open_shop_page_with_retry(page: Page, url: str, attempts: int = 3) -> 
             return
         except Exception as exc:
             last_error = exc
+            await _capture_login_error_screenshot(page, f"shop_ready_retry_{attempt}")
             if attempt < attempts:
                 await asyncio.sleep(jitter(1.5, 0.6))
             else:
@@ -292,6 +306,7 @@ async def _fill_first_input(page: Page, selectors: list[str], value: str) -> boo
 async def _close_passport_frame(page: Page) -> None:
     selectors = [
         "#component_passport .passport--frame-close",
+        ".passport--container-outer .passport--frame-close",
         "div.passport--frame-close",
     ]
     for selector in selectors:
@@ -367,6 +382,9 @@ async def _capture_login_error_screenshot(page: Page | None, tag: str) -> str | 
     if not page:
         return None
     try:
+        if page.is_closed():
+            logger.warning("[SHOP] ⚠️ Не удалось сделать скриншот ошибки: page already closed.")
+            return None
         screenshots_dir = os.path.join("logs", "screenshots", f"{datetime.now():%Y-%m-%d}")
         os.makedirs(screenshots_dir, exist_ok=True)
         safe_tag = re.sub(r"[^a-zA-Z0-9_-]+", "_", tag).strip("_")[:40] or "error"
