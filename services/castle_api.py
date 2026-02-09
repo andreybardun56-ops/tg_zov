@@ -306,6 +306,38 @@ async def _capture_login_error_screenshot(page: Page | None, tag: str) -> str | 
         return None
 
 
+async def _is_login_form_visible(page: Page, selectors: list[str]) -> bool:
+    for frame in page.frames:
+        for selector in selectors:
+            try:
+                locator = frame.locator(selector)
+                if await locator.count() == 0:
+                    continue
+                if await locator.first.is_visible():
+                    return True
+            except Exception as exc:
+                logger.debug("[SHOP] Login form visibility check failed (%s): %s", selector, exc)
+    return False
+
+
+async def _wait_for_login_form(page: Page, timeout: int = 15000) -> bool:
+    selectors = [
+        ".passport--modal",
+        ".passport--form",
+        ".passport--form-ipt",
+        "input[type=\"email\"]",
+        "input.passport--email-ipt",
+        "input[type=\"password\"]",
+        "input.passport--password-ipt",
+    ]
+    deadline = time.monotonic() + (timeout / 1000)
+    while time.monotonic() < deadline:
+        if await _is_login_form_visible(page, selectors):
+            return True
+        await asyncio.sleep(0.4)
+    return False
+
+
 async def login_shop_email(email: str, password: str) -> dict[str, Any]:
     """
     Авторизация на https://castleclash.igg.com/shop/ через email+пароль.
@@ -358,12 +390,10 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
             for attempt in range(1, 3):
                 modal_opened = await _open_login_modal(page)
                 if modal_opened:
-                    try:
-                        await page.wait_for_selector(".passport--modal", state="visible", timeout=15000)
+                    if await _wait_for_login_form(page, timeout=15000):
                         login_modal_ready = True
                         break
-                    except PlaywrightTimeout:
-                        logger.warning("[SHOP] ⚠️ Окно авторизации не появилось за 15 секунд.")
+                    logger.warning("[SHOP] ⚠️ Окно авторизации не появилось за 15 секунд.")
                 else:
                     logger.warning("[SHOP] ⚠️ Не удалось нажать кнопку авторизации.")
                 if attempt < 2:
