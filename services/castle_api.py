@@ -10,7 +10,6 @@ from datetime import datetime
 from typing import Any, TypedDict
 from playwright.async_api import (
     BrowserContext,
-    Locator,
     Page,
     Playwright,
     TimeoutError as PlaywrightTimeout,
@@ -666,7 +665,7 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                 await _capture_login_error_screenshot(page, "login_failed")
                 logger.error("[SHOP] ❌ Ошибка ожидания подтверждения входа: %s", exc)
 
-            await _close_passport_frame(page)
+            # await _close_passport_frame(page)
             parsed_uid, parsed_username = await _extract_userbar_info(page)
 
             logger.info("[SHOP] 🔎 Проверяем cookies после входа")
@@ -924,7 +923,7 @@ async def complete_shop_login_igg(
         except Exception as exc:
             logger.debug("[SHOP] Userbar wait failed after IGG login: %s", exc)
 
-        await _close_passport_frame(page)
+        # await _close_passport_frame(page)
         parsed_uid, parsed_username = await _extract_userbar_info(page)
 
         cookies_list = await context.cookies()
