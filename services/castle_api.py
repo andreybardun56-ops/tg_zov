@@ -691,44 +691,23 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                 wait_until="domcontentloaded",
                 timeout=60000,
             )
-            try:
-                if await page.locator("#onetrust-accept-btn-handler").count() > 0:
-                    await page.locator("#onetrust-accept-btn-handler").click(timeout=3000)
-                elif await page.locator("text=Accept All").count() > 0:
-                    await page.locator("text=Accept All").click(timeout=3000)
-                elif await page.locator("text=Принять все").count() > 0:
-                    await page.locator("text=Принять все").click(timeout=3000)
-            except Exception:
-                pass
+            await _accept_cookies(page)
             await humanize_pre_action(page)
 
             logger.info("[SHOP] ✉️ Вводим email")
-            filled_email = False
-            for selector in [
-                'input[name="email"]',
-                'input[type="email"]',
-                "input#email",
-                'input[placeholder*="Email"]',
-                'input[placeholder*="E-mail"]',
-                'input[placeholder*="邮箱"]',
-                'input[autocomplete="email"]',
-            ]:
-                try:
-                    el = await page.query_selector(selector)
-                    if el:
-                        await el.fill(str(email), timeout=4000)
-                        filled_email = True
-                        break
-                except Exception:
-                    continue
-            if not filled_email:
-                try:
-                    first_input = await page.query_selector("input")
-                    if first_input:
-                        await first_input.fill(str(email))
-                        filled_email = True
-                except Exception:
-                    pass
+            filled_email = await _fill_first_input(
+                page,
+                [
+                    'input[name="email"]',
+                    'input[type="email"]',
+                    "input#email",
+                    'input[placeholder*="Email"]',
+                    'input[placeholder*="E-mail"]',
+                    'input[placeholder*="邮箱"]',
+                    'input[autocomplete="email"]',
+                ],
+                email,
+            )
             if not filled_email:
                 await _capture_login_error_screenshot(page, "email_not_found")
                 return {
@@ -740,22 +719,17 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                 }
 
             logger.info("[SHOP] 🔒 Вводим пароль")
-            filled_pass = False
-            for selector in [
-                'input[name="password"]',
-                'input[type="password"]',
-                "input#password",
-                'input[placeholder*="Password"]',
-                'input[autocomplete="current-password"]',
-            ]:
-                try:
-                    el = await page.query_selector(selector)
-                    if el:
-                        await el.fill(str(password), timeout=4000)
-                        filled_pass = True
-                        break
-                except Exception:
-                    continue
+            filled_pass = await _fill_first_input(
+                page,
+                [
+                    'input[name="password"]',
+                    'input[type="password"]',
+                    "input#password",
+                    'input[placeholder*="Password"]',
+                    'input[autocomplete="current-password"]',
+                ],
+                password,
+            )
             if not filled_pass:
                 await _capture_login_error_screenshot(page, "password_not_found")
                 return {
@@ -767,6 +741,7 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                 }
 
             logger.info("[SHOP] ✅ Нажимаем кнопку входа")
+            await _accept_cookies(page)
             clicked = False
             for selector in [
                 'button[type="submit"]',
@@ -778,11 +753,12 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                 'input[type="submit"]',
             ]:
                 try:
-                    btn = await page.query_selector(selector)
-                    if btn:
-                        await btn.click()
-                        clicked = True
-                        break
+                    locator = page.locator(selector)
+                    if await locator.count() == 0:
+                        continue
+                    await locator.first.click(timeout=5000)
+                    clicked = True
+                    break
                 except Exception:
                     continue
 
@@ -793,13 +769,7 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                     pass
 
             await page.wait_for_timeout(7000)
-            try:
-                if await page.locator("text=Accept All").count() > 0:
-                    await page.locator("text=Accept All").click(timeout=3000)
-                elif await page.locator("text=Принять все").count() > 0:
-                    await page.locator("text=Принять все").click(timeout=3000)
-            except Exception:
-                pass
+            await _accept_cookies(page)
 
             logger.info("[SHOP] 🔎 Проверяем cookies после входа")
             cookies_result: dict[str, str] = {}
