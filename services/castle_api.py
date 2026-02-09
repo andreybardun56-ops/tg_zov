@@ -308,6 +308,113 @@ async def _fill_first_input(page: Page, selectors: list[str], value: str) -> boo
     return False
 
 
+async def _dispatch_vue_input_events(page: Page, selectors: list[str]) -> bool:
+    for selector in selectors:
+        contexts = [page, *page.frames]
+        for ctx in contexts:
+            try:
+                found = await ctx.evaluate(
+                    """(sel) => {
+                        const el = document.querySelector(sel);
+                        if (!el) return false;
+                        const events = ["input", "change"];
+                        for (const type of events) {
+                            const event = new Event(type, { bubbles: true });
+                            el.dispatchEvent(event);
+                        }
+                        if (typeof el.blur === "function") {
+                            el.blur();
+                        }
+                        return true;
+                    }""",
+                    selector,
+                )
+                if found:
+                    return True
+            except Exception as exc:
+                logger.debug("[SHOP] Vue input event dispatch failed (%s): %s", selector, exc)
+    return False
+
+
+async def _wait_for_auth_cookie(
+    page: Page,
+    context: BrowserContext,
+    timeout_ms: int = 20000,
+) -> bool:
+    cookie_names = {"gpc_sso_token", "ssoToken", "passport_token"}
+    deadline = time.monotonic() + (timeout_ms / 1000)
+    while time.monotonic() < deadline:
+        try:
+            cookies = await context.cookies()
+        except Exception as exc:
+            logger.debug("[SHOP] Cookie read failed while waiting auth cookie: %s", exc)
+            cookies = []
+        if any(cookie.get("name") in cookie_names for cookie in cookies):
+            return True
+        await page.wait_for_timeout(500)
+    return False
+
+
+async def _wait_for_login_response(page: Page, timeout_ms: int = 20000) -> bool:
+    def _matches(response) -> bool:
+        try:
+            url = response.url.lower()
+            return ("passport" in url or "/login" in url) and response.ok
+        except Exception:
+            return False
+
+    try:
+        response = await page.wait_for_response(_matches, timeout=timeout_ms)
+        if response:
+            logger.debug("[SHOP] Login response OK: %s", response.url)
+            return True
+    except PlaywrightTimeout:
+        return False
+    except Exception as exc:
+        logger.debug("[SHOP] Login response wait failed: %s", exc)
+    return False
+
+
+async def _wait_for_login_success(page: Page, context: BrowserContext, timeout_ms: int = 20000) -> bool:
+    response_task = asyncio.create_task(_wait_for_login_response(page, timeout_ms))
+    cookie_task = asyncio.create_task(_wait_for_auth_cookie(page, context, timeout_ms))
+    done, pending = await asyncio.wait(
+        {response_task, cookie_task},
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    for task in pending:
+        task.cancel()
+    if not done:
+        return False
+    return any(task.result() for task in done if not task.cancelled())
+
+
+async def _try_vue_login(page: Page, selectors: list[str]) -> bool:
+    for selector in selectors:
+        contexts = [page, *page.frames]
+        for ctx in contexts:
+            try:
+                invoked = await ctx.evaluate(
+                    """(sel) => {
+                        const btn = document.querySelector(sel);
+                        if (!btn || !btn.__vueParentComponent) return false;
+                        const comp = btn.__vueParentComponent;
+                        const login = comp?.ctx?.login;
+                        if (typeof login === "function") {
+                            login.call(comp.ctx);
+                            return true;
+                        }
+                        return false;
+                    }""",
+                    selector,
+                )
+                if invoked:
+                    return True
+            except Exception as exc:
+                logger.debug("[SHOP] Vue login invoke failed (%s): %s", selector, exc)
+    return False
+
+
 async def _clear_page_storage(page: Page) -> None:
     try:
         await page.evaluate("() => { localStorage.clear(); sessionStorage.clear(); }")
@@ -328,31 +435,33 @@ async def _click_login_button(page: Page, selectors: list[str]) -> bool:
         contexts = [page, *page.frames]
         for ctx in contexts:
             try:
-                locator: Locator = ctx.locator(selector)
-                if await locator.count() == 0:
-                    continue
-                found_any = True
-                await locator.first.scroll_into_view_if_needed(timeout=3000)
-                if hasattr(locator, "is_enabled") and not await locator.first.is_enabled():
-                    try:
-                        await locator.first.wait_for(state="visible", timeout=3000)
-                    except PlaywrightTimeout:
-                        pass
                 try:
-                    await locator.first.evaluate(
-                        """(el) => {
-                            const events = ["mousedown", "mouseup", "click"];
-                            for (const type of events) {
-                                const event = new MouseEvent(type, {
-                                    bubbles: true,
-                                    cancelable: true,
-                                    view: window,
-                                });
-                                el.dispatchEvent(event);
+                    clicked = await ctx.evaluate(
+                        """(sel) => {
+                            const btn = document.querySelector(sel);
+                            if (!btn) return false;
+                            btn.scrollIntoView({ block: "center", inline: "center" });
+                            const down = new PointerEvent("pointerdown", {
+                                bubbles: true,
+                                cancelable: true,
+                                pointerType: "mouse",
+                            });
+                            const up = new PointerEvent("pointerup", {
+                                bubbles: true,
+                                cancelable: true,
+                                pointerType: "mouse",
+                            });
+                            btn.dispatchEvent(down);
+                            btn.dispatchEvent(up);
+                            if (typeof btn.click === "function") {
+                                btn.click();
                             }
+                            return true;
                         }""",
+                        selector,
                     )
-                    return True
+                    if clicked:
+                        return True
                 except Exception as exc:
                     logger.warning("[SHOP] Dispatch login click failed (%s): %s", selector, exc)
             except Exception as exc:
@@ -597,6 +706,20 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                     "cookies": None,
                     "username": None,
                 }
+            await _dispatch_vue_input_events(
+                page,
+                [
+                    'input[type="email"]',
+                    'input.passport--email-ipt',
+                    '.passport--email-item input.passport--email-ipt',
+                    '.passport--email-item input.passport--form-ipt',
+                    'input[placeholder*="E-mail"]',
+                    'input[placeholder*="Email"]',
+                    'input[placeholder*="Почта"]',
+                    'input[placeholder*="имя пользователя"]',
+                    'input.passport--form-ipt',
+                ],
+            )
 
             logger.info("[SHOP] 🔒 Вводим пароль")
             filled_pass = await _fill_first_input(
@@ -621,6 +744,18 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                     "cookies": None,
                     "username": None,
                 }
+            await _dispatch_vue_input_events(
+                page,
+                [
+                    'input[type="password"]',
+                    'input.passport--password-ipt',
+                    '.passport--email-item input.passport--password-ipt',
+                    '.passport--email-item input[type="password"]',
+                    'input[placeholder*="текущий пароль"]',
+                    'input[placeholder*="Пароль"]',
+                    'input[placeholder*="Password"]',
+                ],
+            )
 
             logger.info("[SHOP] ✅ Нажимаем кнопку входа")
             await _accept_cookies(page)
@@ -638,24 +773,19 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                     "username": None,
                 }
 
-            try:
-                await page.wait_for_selector("#userBar", state="visible", timeout=30000)
-            except PlaywrightTimeout:
+            login_success = await _wait_for_login_success(page, context, timeout_ms=30000)
+            if not login_success:
+                logger.info("[SHOP] 🔁 Пробуем вызвать Vue login() напрямую.")
+                invoked = await _try_vue_login(page, login_button_selectors)
+                if invoked:
+                    login_success = await _wait_for_login_success(page, context, timeout_ms=20000)
+
+            if not login_success:
                 await _capture_login_error_screenshot(page, "login_failed")
-                logger.error("[SHOP] ❌ Не удалось дождаться подтверждения входа (#userBar).")
+                logger.error("[SHOP] ❌ Не удалось дождаться подтверждения входа.")
                 return {
                     "success": False,
-                    "error": "Не удалось дождаться подтверждения входа (#userBar).",
-                    "uid": None,
-                    "cookies": None,
-                    "username": None,
-                }
-            except Exception as exc:
-                await _capture_login_error_screenshot(page, "login_failed")
-                logger.error("[SHOP] ❌ Ошибка ожидания подтверждения входа: %s", exc)
-                return {
-                    "success": False,
-                    "error": "Ошибка ожидания подтверждения входа.",
+                    "error": "Не удалось дождаться подтверждения входа.",
                     "uid": None,
                     "cookies": None,
                     "username": None,
@@ -888,6 +1018,14 @@ async def complete_shop_login_igg(
                 "cookies": None,
                 "username": None,
             }
+        await _dispatch_vue_input_events(
+            page,
+            [
+                'input.passport--password-ipt',
+                'input[placeholder*="Код"]',
+                'input[type="text"]',
+            ],
+        )
 
         login_button_selectors = [
             "a.passport--passport-common-btn.passport--yellow",
@@ -909,22 +1047,17 @@ async def complete_shop_login_igg(
         except PlaywrightTimeout:
             pass
 
-        try:
-            await page.wait_for_selector("#userBar", state="visible", timeout=30000)
-        except PlaywrightTimeout:
-            logger.debug("[SHOP] Login success marker #userBar not visible after IGG login.")
+        login_success = await _wait_for_login_success(page, context, timeout_ms=30000)
+        if not login_success:
+            logger.info("[SHOP] 🔁 Пробуем вызвать Vue login() напрямую.")
+            invoked = await _try_vue_login(page, login_button_selectors)
+            if invoked:
+                login_success = await _wait_for_login_success(page, context, timeout_ms=20000)
+        if not login_success:
+            logger.debug("[SHOP] Login success markers not found after IGG login.")
             return {
                 "success": False,
-                "error": "Не удалось дождаться подтверждения входа (#userBar).",
-                "uid": None,
-                "cookies": None,
-                "username": None,
-            }
-        except Exception as exc:
-            logger.debug("[SHOP] Userbar wait failed after IGG login: %s", exc)
-            return {
-                "success": False,
-                "error": "Ошибка ожидания подтверждения входа.",
+                "error": "Не удалось дождаться подтверждения входа.",
                 "uid": None,
                 "cookies": None,
                 "username": None,
