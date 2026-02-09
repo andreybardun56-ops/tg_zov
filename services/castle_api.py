@@ -375,11 +375,30 @@ async def _wait_for_login_response(page: Page, timeout_ms: int = 20000) -> bool:
     return False
 
 
+async def _wait_for_login_indicator(page: Page, timeout_ms: int = 20000) -> bool:
+    deadline = time.monotonic() + (timeout_ms / 1000)
+    while time.monotonic() < deadline:
+        try:
+            userbar_info = page.locator(".userbar-info.after-login").first
+            if await userbar_info.count() > 0 and await userbar_info.is_visible():
+                igg_locator = userbar_info.locator(
+                    '.user__infos-item:has-text("IGG ID") .infos-item-txt'
+                ).first
+                if await igg_locator.count() > 0:
+                    igg_id = (await igg_locator.inner_text()).strip()
+                    if igg_id and igg_id != "0":
+                        return True
+        except Exception as exc:
+            logger.debug("[SHOP] Login indicator check failed: %s", exc)
+        await page.wait_for_timeout(500)
+    return False
+
+
 async def _wait_for_login_success(page: Page, context: BrowserContext, timeout_ms: int = 20000) -> bool:
-    response_task = asyncio.create_task(_wait_for_login_response(page, timeout_ms))
+    indicator_task = asyncio.create_task(_wait_for_login_indicator(page, timeout_ms))
     cookie_task = asyncio.create_task(_wait_for_auth_cookie(page, context, timeout_ms))
     done, pending = await asyncio.wait(
-        {response_task, cookie_task},
+        {indicator_task, cookie_task},
         return_when=asyncio.FIRST_COMPLETED,
     )
     for task in pending:
