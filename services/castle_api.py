@@ -582,9 +582,9 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                 login_btn = page.locator(
                     "a.passport--passport-common-btn.passport--yellow:has-text('Вход')"
                 )
-            if await login_btn.count() > 0:
-                await login_btn.first.click(timeout=5000)
-            else:
+            clicked = await _click_login_button(page, login_btn)
+            if not clicked:
+                logger.warning("[SHOP] Не удалось нажать кнопку входа, пробуем Enter.")
                 await page.keyboard.press("Enter")
 
             try:
@@ -828,9 +828,9 @@ async def complete_shop_login_igg(
             }
 
         login_btn = page.locator("a.passport--passport-common-btn.passport--yellow")
-        if await login_btn.count() > 0:
-            await login_btn.first.click(timeout=5000)
-        else:
+        clicked = await _click_login_button(page, login_btn)
+        if not clicked:
+            logger.warning("[SHOP] Не удалось нажать кнопку входа, пробуем Enter.")
             await page.keyboard.press("Enter")
 
         await _accept_cookies(page)
