@@ -123,6 +123,9 @@ SHOP_READY_SELECTORS = [
     "div.userbar .btn-login.login__btn.before-login",
     ".main .userbar .btn-login.login__btn.before-login",
     ".passport--modal",
+    "#component_passport .passport--frame-close",
+    ".passport--container-outer",
+    ".passport--container",
     ".userbar",
     "#userBar",
 ]
