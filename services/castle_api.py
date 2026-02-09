@@ -138,6 +138,13 @@ async def wait_shop_ready(page: Page, timeout: int = 60000, attempts: int = 2) -
     def _remaining_ms() -> int:
         return int(max(0, (deadline - time.monotonic()) * 1000))
 
+    async def _has_userbar() -> bool:
+        try:
+            return await page.locator("#userBar, .userbar").count() > 0
+        except Exception as exc:
+            logger.debug("[SHOP] Userbar presence check failed: %s", exc)
+            return False
+
     for attempt in range(1, attempts + 1):
         try:
             remaining_ms = min(15000, _remaining_ms())
@@ -160,6 +167,9 @@ async def wait_shop_ready(page: Page, timeout: int = 60000, attempts: int = 2) -
         for selector in SHOP_READY_SELECTORS:
             remaining_ms = _remaining_ms()
             if remaining_ms <= 0:
+                if await _has_userbar():
+                    logger.info("[SHOP] Userbar present despite readiness timeout.")
+                    return
                 logger.warning("[SHOP] Page readiness timeout exceeded.")
                 raise PlaywrightTimeout("Shop readiness timeout exceeded.")
             try:
@@ -171,6 +181,9 @@ async def wait_shop_ready(page: Page, timeout: int = 60000, attempts: int = 2) -
                 logger.debug("[SHOP] Wait selector failed (%s): %s", selector, exc)
 
         if attempt < attempts:
+            if await _has_userbar():
+                logger.info("[SHOP] Userbar present after readiness attempts.")
+                return
             logger.warning("[SHOP] ⚠️ Готовность магазина не подтверждена, попытка %s/%s.", attempt, attempts)
             await asyncio.sleep(jitter(1.0, 0.5))
 
