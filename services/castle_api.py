@@ -468,7 +468,12 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
             )
             context = ctx["context"]
             page = ctx["page"]
+            try:
+                await context.clear_cookies()
+            except Exception as exc:
+                logger.debug("[SHOP] Cookie clear failed before login: %s", exc)
             await open_shop_page_with_retry(page, "https://castleclash.igg.com/shop/")
+            await _clear_page_storage(page)
             await _accept_cookies(page)
             if await _is_access_denied(page):
                 await _capture_login_error_screenshot(page, "access_denied")
@@ -669,9 +674,14 @@ async def start_shop_login_igg(igg_id: str) -> dict[str, Any]:
         )
         context = ctx["context"]
         page = ctx["page"]
+        try:
+            await context.clear_cookies()
+        except Exception as exc:
+            logger.debug("[SHOP] Cookie clear failed before IGG login: %s", exc)
 
         logger.info("[SHOP] 🌍 Открываем страницу магазина (IGG ID)")
         await open_shop_page_with_retry(page, "https://castleclash.igg.com/shop/")
+        await _clear_page_storage(page)
         await _accept_cookies(page)
         if await _is_access_denied(page):
             await _capture_login_error_screenshot(page, "access_denied")
