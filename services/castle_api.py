@@ -8,7 +8,13 @@ import re
 import time
 from datetime import datetime
 from typing import Any, TypedDict
-from playwright.async_api import BrowserContext, Page, Playwright, TimeoutError as PlaywrightTimeout
+from playwright.async_api import (
+    BrowserContext,
+    Locator,
+    Page,
+    Playwright,
+    TimeoutError as PlaywrightTimeout,
+)
 from services.logger import logger
 from services.browser_patches import (
     BROWSER_PATH,
@@ -303,6 +309,55 @@ async def _fill_first_input(page: Page, selectors: list[str], value: str) -> boo
     return False
 
 
+async def _clear_page_storage(page: Page) -> None:
+    try:
+        await page.evaluate("() => { localStorage.clear(); sessionStorage.clear(); }")
+    except Exception as exc:
+        logger.debug("[SHOP] Storage clear failed: %s", exc)
+
+
+async def _click_login_button(page: Page, locator: Locator) -> bool:
+    try:
+        if await locator.count() == 0:
+            return False
+    except Exception as exc:
+        logger.debug("[SHOP] Login button lookup failed: %s", exc)
+        return False
+
+    try:
+        await page.locator(".passport--container-outer").wait_for(state="hidden", timeout=3000)
+    except PlaywrightTimeout:
+        pass
+    except Exception as exc:
+        logger.debug("[SHOP] Login overlay wait failed: %s", exc)
+
+    try:
+        await locator.first.click(timeout=5000)
+        return True
+    except PlaywrightTimeout as exc:
+        logger.warning("[SHOP] Login click timeout, trying fallback: %s", exc)
+    except Exception as exc:
+        logger.warning("[SHOP] Login click failed, trying fallback: %s", exc)
+
+    try:
+        await _close_passport_frame(page)
+    except Exception as exc:
+        logger.debug("[SHOP] Login click fallback close failed: %s", exc)
+
+    try:
+        await locator.first.click(timeout=5000, force=True)
+        return True
+    except Exception as exc:
+        logger.debug("[SHOP] Forced login click failed: %s", exc)
+
+    try:
+        await page.evaluate("(el) => el.click()", await locator.first.element_handle())
+        return True
+    except Exception as exc:
+        logger.debug("[SHOP] JS login click failed: %s", exc)
+        return False
+
+
 async def _close_passport_frame(page: Page) -> None:
     selectors = [
         "#component_passport .passport--frame-close",
@@ -473,7 +528,10 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
             except Exception as exc:
                 logger.debug("[SHOP] Cookie clear failed before login: %s", exc)
             await open_shop_page_with_retry(page, "https://castleclash.igg.com/shop/")
-            await _clear_page_storage(page)
+            if "_clear_page_storage" in globals():
+                await _clear_page_storage(page)
+            else:
+                logger.warning("[SHOP] Storage clear helper missing; skipping.")
             await _accept_cookies(page)
             if await _is_access_denied(page):
                 await _capture_login_error_screenshot(page, "access_denied")
@@ -572,9 +630,19 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                 login_btn = page.locator(
                     "a.passport--passport-common-btn.passport--yellow:has-text('Вход')"
                 )
-            if await login_btn.count() > 0:
-                await login_btn.first.click(timeout=5000)
+            if "_click_login_button" in globals():
+                clicked = await _click_login_button(page, login_btn)
             else:
+                logger.warning("[SHOP] Login click helper missing; falling back to direct click.")
+                clicked = False
+                if await login_btn.count() > 0:
+                    try:
+                        await login_btn.first.click(timeout=5000)
+                        clicked = True
+                    except Exception as exc:
+                        logger.debug("[SHOP] Direct login click failed: %s", exc)
+            if not clicked:
+                logger.warning("[SHOP] Не удалось нажать кнопку входа, пробуем Enter.")
                 await page.keyboard.press("Enter")
 
             try:
@@ -681,7 +749,10 @@ async def start_shop_login_igg(igg_id: str) -> dict[str, Any]:
 
         logger.info("[SHOP] 🌍 Открываем страницу магазина (IGG ID)")
         await open_shop_page_with_retry(page, "https://castleclash.igg.com/shop/")
-        await _clear_page_storage(page)
+        if "_clear_page_storage" in globals():
+            await _clear_page_storage(page)
+        else:
+            logger.warning("[SHOP] Storage clear helper missing; skipping.")
         await _accept_cookies(page)
         if await _is_access_denied(page):
             await _capture_login_error_screenshot(page, "access_denied")
@@ -815,9 +886,19 @@ async def complete_shop_login_igg(
             }
 
         login_btn = page.locator("a.passport--passport-common-btn.passport--yellow")
-        if await login_btn.count() > 0:
-            await login_btn.first.click(timeout=5000)
+        if "_click_login_button" in globals():
+            clicked = await _click_login_button(page, login_btn)
         else:
+            logger.warning("[SHOP] Login click helper missing; falling back to direct click.")
+            clicked = False
+            if await login_btn.count() > 0:
+                try:
+                    await login_btn.first.click(timeout=5000)
+                    clicked = True
+                except Exception as exc:
+                    logger.debug("[SHOP] Direct login click failed: %s", exc)
+        if not clicked:
+            logger.warning("[SHOP] Не удалось нажать кнопку входа, пробуем Enter.")
             await page.keyboard.press("Enter")
 
         await _accept_cookies(page)
