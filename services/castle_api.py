@@ -123,6 +123,9 @@ SHOP_READY_SELECTORS = [
     "div.userbar .btn-login.login__btn.before-login",
     ".main .userbar .btn-login.login__btn.before-login",
     ".passport--modal",
+    "#component_passport .passport--frame-close",
+    ".passport--container-outer",
+    ".passport--container",
     ".userbar",
     "#userBar",
 ]
@@ -284,6 +287,81 @@ async def _fill_first_input(page: Page, selectors: list[str], value: str) -> boo
         except Exception as exc:
             logger.debug("[SHOP] Failed to fill input (%s): %s", selector, exc)
     return False
+
+
+async def _close_passport_frame(page: Page) -> None:
+    selectors = [
+        "#component_passport .passport--frame-close",
+        ".passport--container-outer .passport--frame-close",
+        "div.passport--frame-close",
+    ]
+    for selector in selectors:
+        try:
+            locator = page.locator(selector)
+            if await locator.count() > 0 and await locator.first.is_visible():
+                await locator.first.click(timeout=3000)
+                return
+        except Exception as exc:
+            logger.debug("[SHOP] Passport close failed (%s): %s", selector, exc)
+
+    for frame in page.frames:
+        for selector in selectors:
+            try:
+                locator = frame.locator(selector)
+                if await locator.count() > 0 and await locator.first.is_visible():
+                    await locator.first.click(timeout=3000)
+                    return
+            except Exception as exc:
+                logger.debug("[SHOP] Passport frame close failed (%s): %s", selector, exc)
+
+
+async def _extract_userbar_info(page: Page) -> tuple[str | None, str | None]:
+    uid: str | None = None
+    username: str | None = None
+    selectors = [
+        "#userBar .name",
+        "#userBar .username",
+        "#userBar .nickname",
+        "#userBar .user-name",
+        ".userbar .name",
+        ".userbar .username",
+        ".userbar .nickname",
+        ".userbar__name",
+        ".userbar .userbar__name",
+    ]
+    for selector in selectors:
+        try:
+            locator = page.locator(selector)
+            if await locator.count() == 0:
+                continue
+            text = (await locator.first.inner_text()).strip()
+            if text:
+                username = text
+                break
+        except Exception as exc:
+            logger.debug("[SHOP] Username lookup failed (%s): %s", selector, exc)
+
+    try:
+        userbar = page.locator("#userBar, .userbar").first
+        if await userbar.count() > 0:
+            text = (await userbar.inner_text()).strip()
+            if text:
+                match = re.search(r"\b\d{6,12}\b", text)
+                if match:
+                    uid = match.group(0)
+                if not username:
+                    lines = [line.strip() for line in text.splitlines() if line.strip()]
+                    for line in lines:
+                        if "IGG" in line or "ID" in line:
+                            continue
+                        if re.search(r"\b\d{6,12}\b", line):
+                            continue
+                        username = line
+                        break
+    except Exception as exc:
+        logger.debug("[SHOP] Userbar parse failed: %s", exc)
+
+    return uid, username
 
 
 async def _capture_login_error_screenshot(page: Page | None, tag: str) -> str | None:
@@ -486,11 +564,16 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                 await _capture_login_error_screenshot(page, "login_failed")
                 logger.error("[SHOP] ❌ Ошибка ожидания подтверждения входа: %s", exc)
 
+            await _close_passport_frame(page)
+            parsed_uid, parsed_username = await _extract_userbar_info(page)
+
             logger.info("[SHOP] 🔎 Проверяем cookies после входа")
             cookies_list = await context.cookies()
             cookies_result = {c["name"]: c["value"] for c in cookies_list}
             token = cookies_result.get("gpc_sso_token")
             uid = jwt_get_uid(token) if token else None
+            if parsed_uid and not uid:
+                uid = parsed_uid
             if not uid:
                 await _capture_login_error_screenshot(page, "uid_not_found")
                 return {
@@ -498,7 +581,7 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                     "error": "Не удалось получить IGG ID после входа.",
                     "uid": None,
                     "cookies": cookies_result,
-                    "username": None,
+                    "username": parsed_username,
                 }
 
             logger.info("[SHOP] ✅ Вход успешен, UID=%s", uid)
@@ -513,7 +596,7 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                 "error": None,
                 "uid": uid,
                 "cookies": cookies_result,
-                "username": "Игрок",
+                "username": parsed_username or "Игрок",
             }
     except Exception as e:
         await _capture_login_error_screenshot(page, "exception")
@@ -717,17 +800,30 @@ async def complete_shop_login_igg(
         except PlaywrightTimeout:
             pass
 
+        try:
+            await page.wait_for_selector("#userBar", state="visible", timeout=30000)
+        except PlaywrightTimeout:
+            logger.debug("[SHOP] Login success marker #userBar not visible after IGG login.")
+        except Exception as exc:
+            logger.debug("[SHOP] Userbar wait failed after IGG login: %s", exc)
+
+        await _close_passport_frame(page)
+        parsed_uid, parsed_username = await _extract_userbar_info(page)
+
         cookies_list = await context.cookies()
         cookies_result = {c["name"]: c["value"] for c in cookies_list}
         token = cookies_result.get("gpc_sso_token")
         uid = jwt_get_uid(token) if token else None
+
+        if parsed_uid and not uid:
+            uid = parsed_uid
 
         return {
             "success": bool(uid),
             "error": None if uid else "Не удалось получить IGG ID после входа.",
             "uid": uid,
             "cookies": cookies_result,
-            "username": "Игрок",
+            "username": parsed_username or "Игрок",
         }
     except Exception as e:
         logger.exception(f"[SHOP] ❌ Ошибка при подтверждении кода: {e}")
