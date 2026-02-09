@@ -207,6 +207,7 @@ async def open_shop_page_with_retry(page: Page, url: str, attempts: int = 3) -> 
             return
         except Exception as exc:
             last_error = exc
+            await _capture_login_error_screenshot(page, f"shop_ready_retry_{attempt}")
             if attempt < attempts:
                 await asyncio.sleep(jitter(1.5, 0.6))
             else:
@@ -292,6 +293,7 @@ async def _fill_first_input(page: Page, selectors: list[str], value: str) -> boo
 async def _close_passport_frame(page: Page) -> None:
     selectors = [
         "#component_passport .passport--frame-close",
+        ".passport--container-outer .passport--frame-close",
         "div.passport--frame-close",
     ]
     for selector in selectors:
@@ -367,6 +369,9 @@ async def _capture_login_error_screenshot(page: Page | None, tag: str) -> str | 
     if not page:
         return None
     try:
+        if page.is_closed():
+            logger.warning("[SHOP] ⚠️ Не удалось сделать скриншот ошибки: page already closed.")
+            return None
         screenshots_dir = os.path.join("logs", "screenshots", f"{datetime.now():%Y-%m-%d}")
         os.makedirs(screenshots_dir, exist_ok=True)
         safe_tag = re.sub(r"[^a-zA-Z0-9_-]+", "_", tag).strip("_")[:40] or "error"
