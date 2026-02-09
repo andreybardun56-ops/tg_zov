@@ -292,7 +292,6 @@ async def _fill_first_input(page: Page, selectors: list[str], value: str) -> boo
 async def _close_passport_frame(page: Page) -> None:
     selectors = [
         "#component_passport .passport--frame-close",
-        ".passport--container-outer .passport--frame-close",
         "div.passport--frame-close",
     ]
     for selector in selectors:
