@@ -342,6 +342,7 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
             context = ctx["context"]
             page = ctx["page"]
             await open_shop_page_with_retry(page, "https://castleclash.igg.com/shop/")
+            await _accept_cookies(page)
             if await _is_access_denied(page):
                 await _capture_login_error_screenshot(page, "access_denied")
                 return {
@@ -433,6 +434,7 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                 }
 
             logger.info("[SHOP] ✅ Нажимаем кнопку входа")
+            await _accept_cookies(page)
             login_btn = page.locator(
                 ".passport--form-ipt-btns a.passport--passport-common-btn.passport--yellow"
             )
@@ -540,6 +542,7 @@ async def start_shop_login_igg(igg_id: str) -> dict[str, Any]:
 
         logger.info("[SHOP] 🌍 Открываем страницу магазина (IGG ID)")
         await open_shop_page_with_retry(page, "https://castleclash.igg.com/shop/")
+        await _accept_cookies(page)
         if await _is_access_denied(page):
             await _capture_login_error_screenshot(page, "access_denied")
             await _cleanup()
@@ -566,6 +569,7 @@ async def start_shop_login_igg(igg_id: str) -> dict[str, Any]:
                 "owns_playwright": False,
             }
 
+        await _accept_cookies(page)
         await _select_login_tab(page, "igg")
 
         logger.info("[SHOP] 🆔 Вводим IGG ID")
@@ -611,6 +615,8 @@ async def start_shop_login_igg(igg_id: str) -> dict[str, Any]:
         except PlaywrightTimeout:
             pass
 
+        await _accept_cookies(page)
+
         await page.wait_for_selector(
             'input.passport--password-ipt, input[placeholder*="Код"]',
             timeout=15000,
@@ -649,6 +655,7 @@ async def complete_shop_login_igg(
     Завершает авторизацию по IGG ID кодом.
     """
     try:
+        await _accept_cookies(page)
         filled = await _fill_first_input(
             page,
             [
@@ -672,6 +679,8 @@ async def complete_shop_login_igg(
             await login_btn.first.click(timeout=5000)
         else:
             await page.keyboard.press("Enter")
+
+        await _accept_cookies(page)
 
         try:
             await page.wait_for_load_state("networkidle", timeout=30000)

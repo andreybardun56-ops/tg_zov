@@ -61,18 +61,32 @@ def _write_jsonl(path: Path, blocks: List[Dict[str, Any]]):
     os.replace(tmp, path)
 
 
-def _append_log(user_id: int, count: int):
+def _append_log(user_id: int, count: int, user_name: str | None = None, user_tag: str | None = None):
     """Добавляет запись о выдаче кодов в puzzle_claim.log"""
-    PUZZLE_CLAIM_LOG.parent.mkdir(parents=True, exist_ok=True)
-    with open(PUZZLE_CLAIM_LOG, "a", encoding="utf-8") as f:
-        f.write(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] user_id={user_id} получил {count} кодов\n")
-
-
-def _append_specific_log(user_id: int, puzzle_id: int, ec_param: str):
+    safe_name = user_name.replace(" ", "_") if user_name else ""
+    safe_tag = user_tag.lstrip("@") if user_tag else ""
     PUZZLE_CLAIM_LOG.parent.mkdir(parents=True, exist_ok=True)
     with open(PUZZLE_CLAIM_LOG, "a", encoding="utf-8") as f:
         f.write(
-            f"[{datetime.now():%Y-%m-%d %H:%M:%S}] user_id={user_id} получал "
+            f"[{datetime.now():%Y-%m-%d %H:%M:%S}] user_id={user_id} "
+            f"tg_name={safe_name} tg_tag={safe_tag} получил {count} кодов\n"
+        )
+
+
+def _append_specific_log(
+    user_id: int,
+    puzzle_id: int,
+    ec_param: str,
+    user_name: str | None = None,
+    user_tag: str | None = None,
+):
+    safe_name = user_name.replace(" ", "_") if user_name else ""
+    safe_tag = user_tag.lstrip("@") if user_tag else ""
+    PUZZLE_CLAIM_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with open(PUZZLE_CLAIM_LOG, "a", encoding="utf-8") as f:
+        f.write(
+            f"[{datetime.now():%Y-%m-%d %H:%M:%S}] user_id={user_id} "
+            f"tg_name={safe_name} tg_tag={safe_tag} получал "
             f"ec_param={ec_param} puzzle_id={puzzle_id}\n"
         )
 
@@ -111,7 +125,11 @@ def _has_claim_record(user_id: int, ec_param: str) -> bool:
 
 # ─────────────────────────── main ───────────────────────────
 
-async def issue_puzzle_codes(user_id: int) -> List[str]:
+async def issue_puzzle_codes(
+    user_id: int,
+    user_name: str | None = None,
+    user_tag: str | None = None,
+) -> List[str]:
     """
     Выдаёт 30 ec_param кодов, удаляя их из puzzle_data.jsonl.
     Возвращает список выданных кодов.
@@ -152,12 +170,17 @@ async def issue_puzzle_codes(user_id: int) -> List[str]:
         logger.error(f"[PUZZLE_CLAIM] Ошибка записи puzzle_data.jsonl: {e}")
 
     # 6️⃣ добавляем запись в лог
-    _append_log(user_id, len(selected))
+    _append_log(user_id, len(selected), user_name=user_name, user_tag=user_tag)
 
     return selected
 
 
-async def issue_specific_puzzle(user_id: int, puzzle_id: int) -> Optional[str]:
+async def issue_specific_puzzle(
+    user_id: int,
+    puzzle_id: int,
+    user_name: str | None = None,
+    user_tag: str | None = None,
+) -> Optional[str]:
     """Выдаёт конкретный пазл (1–9) из puzzle_data.jsonl."""
     if not PUZZLE_DATA_FILE.exists():
         return None
@@ -218,5 +241,11 @@ async def issue_specific_puzzle(user_id: int, puzzle_id: int) -> Optional[str]:
     if not isinstance(ec_param, str):
         return None
 
-    _append_specific_log(user_id, puzzle_id, ec_param)
+    _append_specific_log(
+        user_id,
+        puzzle_id,
+        ec_param,
+        user_name=user_name,
+        user_tag=user_tag,
+    )
     return ec_param

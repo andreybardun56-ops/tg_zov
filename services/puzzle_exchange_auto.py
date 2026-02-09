@@ -30,6 +30,83 @@ PROFILE_DIR.mkdir(parents=True, exist_ok=True)
 # user_id -> {"page": Page, "context": BrowserContext, "playwright": Playwright, "timer": Task}
 active_sessions: Dict[str, Dict[str, Any]] = {}
 
+
+async def _extract_exchange_items(page: Page) -> Dict[str, Dict[str, Any]]:
+    js = """
+    () => {
+        const results = [];
+        const textFrom = (el) => (el ? el.textContent || "" : "").trim();
+        const pickId = (el) => {
+            const candidates = [
+                el?.dataset?.id,
+                el?.dataset?.itemId,
+                el?.dataset?.goodsId,
+                el?.dataset?.exchangeId,
+                el?.getAttribute?.("data-id"),
+                el?.getAttribute?.("data-item-id"),
+                el?.getAttribute?.("data-goods-id"),
+                el?.getAttribute?.("data-exchange-id"),
+            ].filter(Boolean);
+            if (candidates.length) return String(candidates[0]);
+            const clickable = el?.getAttribute?.("onclick")
+                || el?.querySelector?.("[onclick]")?.getAttribute?.("onclick")
+                || "";
+            const match = String(clickable).match(/exchange\\D*(\\d+)/i);
+            return match ? match[1] : null;
+        };
+        const parseNum = (text) => {
+            const match = String(text).match(/(\\d+)/);
+            return match ? parseInt(match[1], 10) : null;
+        };
+        const nodes = Array.from(
+            document.querySelectorAll(
+                "[data-id],[data-item-id],[data-goods-id],[data-exchange-id],.exchange-item,.exchange-list li"
+            )
+        );
+        for (const el of nodes) {
+            const id = pickId(el);
+            if (!id) continue;
+            const imgEl = el.querySelector("img");
+            const titleEl = el.querySelector(".name,.title,.item-name,.exchange-name,.goods-name");
+            const needEl = el.querySelector(".need,.cost,.fragment,.exchange-cost,.need-fragment");
+            const amountEl = el.querySelector(".amount,.qty,.num,.count,.exchange-amount");
+            const rawText = textFrom(el);
+            const title = textFrom(titleEl) || (imgEl ? (imgEl.alt || "") : "") || rawText.split("\\n")[0] || "";
+            const img = imgEl ? imgEl.src : "";
+            const needText = textFrom(needEl) || rawText;
+            const amountText = textFrom(amountEl) || rawText;
+            let need = parseNum(needText);
+            let amount = parseNum(amountText);
+            const dataset = el.dataset || {};
+            if (!need && dataset.need) need = parseNum(dataset.need);
+            if (!need && dataset.cost) need = parseNum(dataset.cost);
+            if (!amount && dataset.amount) amount = parseNum(dataset.amount);
+            if (!amount && dataset.qty) amount = parseNum(dataset.qty);
+            results.push({
+                id,
+                title,
+                amount: amount || 1,
+                need: need || 1,
+                img,
+            });
+        }
+        return results;
+    }
+    """
+    items_list = await page.evaluate(js)
+    items_map: Dict[str, Dict[str, Any]] = {}
+    for item in items_list or []:
+        item_id = str(item.get("id", "")).strip()
+        if not item_id:
+            continue
+        items_map[item_id] = {
+            "title": item.get("title") or f"ID {item_id}",
+            "amount": int(item.get("amount") or 1),
+            "need": int(item.get("need") or 1),
+            "img": item.get("img") or "",
+        }
+    return items_map
+
 # ---------------- HELPERS ----------------
 def parse_json(text: str):
     try:
@@ -160,6 +237,17 @@ async def get_fragments(user_id: str):
     session = active_sessions.get(user_id)
     if not session: return {"success": False, "message": "Нет активной сессии"}
     return await handle_get_fragment_count(session["page"])
+
+async def get_exchange_items(user_id: str) -> Dict[str, Dict[str, Any]]:
+    session = active_sessions.get(user_id)
+    if not session:
+        return {}
+    page: Page = session["page"]
+    try:
+        return await _extract_exchange_items(page)
+    except Exception as exc:
+        LOG.warning("[exchange_items] ⚠️ Ошибка загрузки предметов: %s", exc)
+        return {}
 
 async def exchange(user_id: str, item_id: str, times: int):
     session = active_sessions.get(user_id)

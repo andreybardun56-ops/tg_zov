@@ -17,8 +17,13 @@ from aiogram.fsm.context import FSMContext
 from html import escape
 import asyncio, logging
 
-from keyboards.inline import EXCHANGE_ITEMS
-from services.puzzle_exchange_auto import get_fragments, exchange, start_session, close_session
+from services.puzzle_exchange_auto import (
+    get_fragments,
+    exchange,
+    start_session,
+    close_session,
+    get_exchange_items,
+)
 
 from config import ADMIN_IDS
 import services.login_and_refresh as lr1
@@ -55,7 +60,7 @@ from keyboards.inline import (
     get_puzzle_numbers_kb,
     get_exchange_accounts_kb,
     get_contact_dev_kb,
-    get_collect_puzzle_kb
+    get_collect_puzzle_kb,
 )
 from keyboards.inline import send_exchange_items
 from services.event_checker import check_all_events
@@ -77,6 +82,107 @@ for path in (
     path.mkdir(parents=True, exist_ok=True)
 
 CLAIM_PUZZLES_CB = "claim_puzzles"
+
+PUZZLE_CLAIM_LOG = Path("data/puzzle_claim_log.json")
+
+
+def _load_puzzle_claim_log() -> dict:
+    if not PUZZLE_CLAIM_LOG.exists():
+        return {}
+    try:
+        with open(PUZZLE_CLAIM_LOG, "r", encoding="utf-8") as f:
+            return json.load(f) or {}
+    except Exception as exc:
+        logger.warning("[STATS] ⚠️ Не удалось прочитать puzzle_claim_log.json: %s", exc)
+        return {}
+
+
+def _build_stats_page(page: int, page_size: int = 7) -> tuple[str, InlineKeyboardMarkup | None]:
+    users = load_all_users()
+    users_with_accounts = {user_id: accs for user_id, accs in users.items() if accs}
+
+    def _sort_key(val: str):
+        return int(val) if str(val).isdigit() else str(val)
+
+    user_ids = sorted(users_with_accounts.keys(), key=_sort_key)
+    total_users = len(user_ids)
+    total_accounts = sum(len(accs) for accs in users_with_accounts.values())
+
+    total_pages = max(1, (total_users + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+    start = page * page_size
+    end = start + page_size
+
+    log_data = _load_puzzle_claim_log()
+    log_users = log_data.get("users", {}) if isinstance(log_data, dict) else {}
+    users_meta = log_data.get("users_meta", {}) if isinstance(log_data, dict) else {}
+
+    lines = [
+        "📊 <b>Статистика аккаунтов</b>",
+        f"👥 Пользователей в базе: <b>{total_users}</b>",
+        f"👤 Всего аккаунтов: <b>{total_accounts}</b>",
+        "",
+        f"👥 <b>Аккаунты по пользователям (страница {page + 1}/{total_pages}):</b>",
+    ]
+
+    if total_users == 0:
+        lines.append("— нет данных")
+    else:
+        for user_id in user_ids[start:end]:
+            accs = users_with_accounts[user_id]
+            user_log = log_users.get(str(user_id), {})
+            total_puzzles = sum(
+                entry.get("count", 0)
+                for entry in user_log.values()
+                if isinstance(entry, dict)
+            )
+            meta = users_meta.get(str(user_id), {})
+            display_name = meta.get("name") or ""
+            display_tag = meta.get("tag") or ""
+            display_bits = " ".join(bit for bit in [display_name, f"@{display_tag}" if display_tag else ""] if bit)
+            label = f"{user_id}"
+            if display_bits:
+                label = f"{label} ({display_bits})"
+            lines.append(
+                f"• <code>{label}</code> — <b>{len(accs)}</b> аккаунтов, 🧩 <b>{total_puzzles}</b>"
+            )
+            acc_details = []
+            for acc in accs:
+                uid = str(acc.get("uid", ""))
+                entry = user_log.get(uid, {})
+                count = entry.get("count", 0) if isinstance(entry, dict) else 0
+                acc_details.append(f"{uid}:{count}")
+            if acc_details:
+                lines.append(f"  └ {', '.join(acc_details)}")
+
+    summary_path = Path("data/puzzle_summary.json")
+    if summary_path.exists():
+        try:
+            with open(summary_path, "r", encoding="utf-8") as f:
+                summary = json.load(f)
+            totals = summary.get("totals", {})
+            all_dup = summary.get("all_duplicates", 0)
+            lines.extend([
+                "",
+                "🧩 <b>Пазлы (итоги)</b>",
+                f"Всего дубликатов: <b>{all_dup}</b>",
+                " | ".join(f"{pid}🧩x{totals.get(str(pid), 0)}" for pid in range(1, 10)),
+            ])
+        except Exception:
+            lines.append("\n⚠️ Не удалось прочитать puzzle_summary.json")
+
+    keyboard = []
+    if total_pages > 1:
+        row = []
+        if page > 0:
+            row.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"stats_page:{page - 1}"))
+        if page < total_pages - 1:
+            row.append(InlineKeyboardButton(text="➡️ Далее", callback_data=f"stats_page:{page + 1}"))
+        if row:
+            keyboard.append(row)
+
+    markup = InlineKeyboardMarkup(inline_keyboard=keyboard) if keyboard else None
+    return "\n".join(lines), markup
 
 
 class AddAccountState(StatesGroup):
@@ -246,41 +352,25 @@ async def show_stats(message: types.Message):
         await message.answer("🚫 У тебя нет доступа.")
         return
 
-    users = load_all_users()
-    total_users = len(users)
-    total_accounts = sum(len(accs) for accs in users.values())
+    text, markup = _build_stats_page(0)
+    await message.answer(text, parse_mode="HTML", reply_markup=markup)
 
-    lines = [
-        "📊 <b>Статистика аккаунтов</b>",
-        f"👥 Пользователей в базе: <b>{total_users}</b>",
-        f"👤 Всего аккаунтов: <b>{total_accounts}</b>",
-        "",
-        "👥 <b>Аккаунты по пользователям:</b>",
-    ]
 
-    if total_users == 0:
-        lines.append("— нет данных")
-    else:
-        for user_id, accs in users.items():
-            lines.append(f"• <code>{user_id}</code> — <b>{len(accs)}</b> аккаунтов")
+@router.callback_query(F.data.startswith("stats_page:"))
+async def paginate_stats(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("🚫 Нет доступа", show_alert=True)
+        return
+    try:
+        _, page_str = callback.data.split(":", 1)
+        page = int(page_str)
+    except (ValueError, IndexError):
+        await callback.answer("⚠️ Некорректная страница", show_alert=True)
+        return
 
-    summary_path = Path("data/puzzle_summary.json")
-    if summary_path.exists():
-        try:
-            with open(summary_path, "r", encoding="utf-8") as f:
-                summary = json.load(f)
-            totals = summary.get("totals", {})
-            all_dup = summary.get("all_duplicates", 0)
-            lines.extend([
-                "",
-                "🧩 <b>Пазлы (итоги)</b>",
-                f"Всего дубликатов: <b>{all_dup}</b>",
-                " | ".join(f"{pid}🧩x{totals.get(str(pid), 0)}" for pid in range(1, 10)),
-            ])
-        except Exception:
-            lines.append("\n⚠️ Не удалось прочитать puzzle_summary.json")
-
-    await message.answer("\n".join(lines), parse_mode="HTML")
+    text, markup = _build_stats_page(page)
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
+    await callback.answer()
 
 @router.message(F.text == "🎯 События")
 async def open_events_menu(message: types.Message):
@@ -335,7 +425,12 @@ async def handle_collect_specific_puzzle(callback: CallbackQuery):
         await callback.message.answer("⚠️ Номер пазла должен быть от 1 до 9.")
         return
 
-    code = await issue_specific_puzzle(callback.from_user.id, puzzle_id)
+    code = await issue_specific_puzzle(
+        callback.from_user.id,
+        puzzle_id,
+        user_name=callback.from_user.full_name,
+        user_tag=callback.from_user.username,
+    )
     if code:
         await callback.message.answer(
             f"🧩 Пазл {puzzle_id} найден!\nТвой код: <code>{code}</code>",
@@ -453,9 +548,6 @@ async def add_account_from_mvp(message: types.Message, state: FSMContext):
     await message.answer(msg, parse_mode="HTML")
 
     await state.clear()
-
-    await message.answer("🎯 Запускаю автоматическую проверку акций...")
-    asyncio.create_task(run_full_event_cycle(bot=message.bot, manual=True))
 
 
 @router.message(AddAccountState.waiting_email)
@@ -1060,7 +1152,11 @@ async def give_30_puzzles_cb(callback: CallbackQuery):
     await callback.answer()  # закроет "часики"
     await callback.message.answer("⏳ Собираю твои 30 кодов...")
 
-    codes = await issue_puzzle_codes(user_id)
+    codes = await issue_puzzle_codes(
+        user_id,
+        user_name=callback.from_user.full_name,
+        user_tag=callback.from_user.username,
+    )
     if not codes:
         await callback.message.answer("⚠️ Нет доступных кодов в puzzle_data.jsonl.")
         return
@@ -1093,7 +1189,15 @@ async def handle_puzzle_claim(callback: CallbackQuery):
 
     async def run_claim():
         try:
-            await claim_puzzle(user_id, uid, int(puzzle_num), bot, msg)
+            await claim_puzzle(
+                user_id,
+                uid,
+                int(puzzle_num),
+                bot,
+                msg,
+                user_name=callback.from_user.full_name,
+                user_tag=callback.from_user.username,
+            )
         except Exception as e:
             await msg.edit_text(f"❌ Ошибка при получении пазла: <code>{e}</code>", parse_mode="HTML")
 
@@ -1176,8 +1280,16 @@ async def start_exchange(callback: types.CallbackQuery, state: FSMContext):
             parse_mode="HTML"
         )
 
+        items = await get_exchange_items(user_id)
+        if not items:
+            await msg.edit_text("⚠️ Не удалось получить список предметов для обмена.")
+            await close_session(user_id)
+            return
+
+        await state.update_data(exchange_items=items)
+
         # Показываем доступные предметы
-        await send_exchange_items(callback.message.bot, user_id, uid)
+        await send_exchange_items(callback.message.bot, user_id, uid, items)
 
         # Таймаут закрытия сессии через 1 минуту
         async def timeout_close():
@@ -1212,7 +1324,18 @@ async def select_item(callback: types.CallbackQuery, state: FSMContext):
         frag_result = await get_fragments(user_id)
         puzzle_left = frag_result.get("puzzle_left", 0)
 
-        item_name, _, need_frag, _ = EXCHANGE_ITEMS[item_id]
+        data = await state.get_data()
+        items = data.get("exchange_items", {})
+        item_info = items.get(item_id)
+        if not item_info:
+            items = await get_exchange_items(user_id)
+            await state.update_data(exchange_items=items)
+            item_info = items.get(item_id)
+        if not item_info:
+            await callback.message.answer("⚠️ Не удалось найти предмет для обмена.")
+            return
+        item_name = item_info.get("title", f"ID {item_id}")
+        need_frag = item_info.get("need", 1)
 
         await callback.message.answer(
             f"Вы выбрали: <b>{item_name}</b>\n"
@@ -1255,7 +1378,17 @@ async def input_amount(message: types.Message, state: FSMContext):
     frag_res = await get_fragments(user_id)
     puzzle_left = frag_res.get("puzzle_left", 0)
 
-    item_name, _, need_frag, _ = EXCHANGE_ITEMS[item_id]
+    items = data.get("exchange_items", {})
+    item_info = items.get(item_id)
+    if not item_info:
+        items = await get_exchange_items(user_id)
+        await state.update_data(exchange_items=items)
+        item_info = items.get(item_id)
+    if not item_info:
+        await message.answer("⚠️ Не удалось найти предмет для обмена.")
+        return
+    item_name = item_info.get("title", f"ID {item_id}")
+    need_frag = item_info.get("need", 1)
     max_possible = puzzle_left // need_frag
 
     if count > max_possible:
