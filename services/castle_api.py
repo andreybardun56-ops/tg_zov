@@ -10,7 +10,6 @@ from datetime import datetime
 from typing import Any, TypedDict
 from playwright.async_api import (
     BrowserContext,
-    Locator,
     Page,
     Playwright,
     TimeoutError as PlaywrightTimeout,
@@ -528,10 +527,7 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
             except Exception as exc:
                 logger.debug("[SHOP] Cookie clear failed before login: %s", exc)
             await open_shop_page_with_retry(page, "https://castleclash.igg.com/shop/")
-            if "_clear_page_storage" in globals():
-                await _clear_page_storage(page)
-            else:
-                logger.warning("[SHOP] Storage clear helper missing; skipping.")
+            await _clear_page_storage(page)
             await _accept_cookies(page)
             if await _is_access_denied(page):
                 await _capture_login_error_screenshot(page, "access_denied")
@@ -623,14 +619,16 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
 
             logger.info("[SHOP] ✅ Нажимаем кнопку входа")
             await _accept_cookies(page)
-            login_btn = page.locator(
-                ".passport--form-ipt-btns a.passport--passport-common-btn.passport--yellow"
+            clicked = await _click_login_button(
+                page,
+                [
+                    ".passport--form-ipt-btns a.passport--passport-common-btn.passport--yellow",
+                    "a.passport--passport-common-btn.passport--yellow:has-text('Вход')",
+                    "button.passport--passport-common-btn.passport--yellow",
+                    "button:has-text('Вход')",
+                    "input[type='submit']",
+                ],
             )
-            if await login_btn.count() == 0:
-                login_btn = page.locator(
-                    "a.passport--passport-common-btn.passport--yellow:has-text('Вход')"
-                )
-            clicked = await _click_login_button(page, login_btn)
             if not clicked:
                 logger.warning("[SHOP] Не удалось нажать кнопку входа, пробуем Enter.")
                 await page.keyboard.press("Enter")
@@ -739,10 +737,7 @@ async def start_shop_login_igg(igg_id: str) -> dict[str, Any]:
 
         logger.info("[SHOP] 🌍 Открываем страницу магазина (IGG ID)")
         await open_shop_page_with_retry(page, "https://castleclash.igg.com/shop/")
-        if "_clear_page_storage" in globals():
-            await _clear_page_storage(page)
-        else:
-            logger.warning("[SHOP] Storage clear helper missing; skipping.")
+        await _clear_page_storage(page)
         await _accept_cookies(page)
         if await _is_access_denied(page):
             await _capture_login_error_screenshot(page, "access_denied")
@@ -875,8 +870,16 @@ async def complete_shop_login_igg(
                 "username": None,
             }
 
-        login_btn = page.locator("a.passport--passport-common-btn.passport--yellow")
-        clicked = await _click_login_button(page, login_btn)
+        clicked = await _click_login_button(
+            page,
+            [
+                "a.passport--passport-common-btn.passport--yellow",
+                "a.passport--passport-common-btn.passport--yellow:has-text('Вход')",
+                "button.passport--passport-common-btn.passport--yellow",
+                "button:has-text('Вход')",
+                "input[type='submit']",
+            ],
+        )
         if not clicked:
             logger.warning("[SHOP] Не удалось нажать кнопку входа, пробуем Enter.")
             await page.keyboard.press("Enter")
