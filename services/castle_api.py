@@ -686,63 +686,49 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                 await context.clear_cookies()
             except Exception as exc:
                 logger.debug("[SHOP] Cookie clear failed before login: %s", exc)
-            await open_shop_page_with_retry(page, "https://castleclash.igg.com/shop/")
-            await _clear_page_storage(page)
-            await _accept_cookies(page)
-            if await _is_access_denied(page):
-                await _capture_login_error_screenshot(page, "access_denied")
-                return {
-                    "success": False,
-                    "error": "Access Denied при открытии страницы (возможна блокировка по IP).",
-                    "uid": None,
-                    "cookies": None,
-                    "username": None,
-                }
+            await page.goto(
+                "https://passport.igg.com/login",
+                wait_until="domcontentloaded",
+                timeout=60000,
+            )
+            try:
+                if await page.locator("#onetrust-accept-btn-handler").count() > 0:
+                    await page.locator("#onetrust-accept-btn-handler").click(timeout=3000)
+                elif await page.locator("text=Accept All").count() > 0:
+                    await page.locator("text=Accept All").click(timeout=3000)
+                elif await page.locator("text=Принять все").count() > 0:
+                    await page.locator("text=Принять все").click(timeout=3000)
+            except Exception:
+                pass
             await humanize_pre_action(page)
 
-            login_modal_ready = False
-            for attempt in range(1, 3):
-                modal_opened = await _open_login_modal(page)
-                if modal_opened:
-                    if await _wait_for_login_form(page, timeout=15000):
-                        login_modal_ready = True
-                        break
-                    logger.warning("[SHOP] ⚠️ Окно авторизации не появилось за 15 секунд.")
-                else:
-                    logger.warning("[SHOP] ⚠️ Не удалось нажать кнопку авторизации.")
-                if attempt < 2:
-                    await page.reload(wait_until="domcontentloaded", timeout=60000)
-                    await _accept_cookies(page)
-
-            if not login_modal_ready:
-                await _capture_login_error_screenshot(page, "open_login_modal")
-                return {
-                    "success": False,
-                    "error": "Не удалось открыть окно авторизации.",
-                    "uid": None,
-                    "cookies": None,
-                    "username": None,
-                }
-
-            await _accept_cookies(page)
-            await _select_login_tab(page, "email")
-
             logger.info("[SHOP] ✉️ Вводим email")
-            filled_email = await _fill_first_input(
-                page,
-                [
-                    'input[type="email"]',
-                    'input.passport--email-ipt',
-                    '.passport--email-item input.passport--email-ipt',
-                    '.passport--email-item input.passport--form-ipt',
-                    'input[placeholder*="E-mail"]',
-                    'input[placeholder*="Email"]',
-                    'input[placeholder*="Почта"]',
-                    'input[placeholder*="имя пользователя"]',
-                    'input.passport--form-ipt',
-                ],
-                email,
-            )
+            filled_email = False
+            for selector in [
+                'input[name="email"]',
+                'input[type="email"]',
+                "input#email",
+                'input[placeholder*="Email"]',
+                'input[placeholder*="E-mail"]',
+                'input[placeholder*="邮箱"]',
+                'input[autocomplete="email"]',
+            ]:
+                try:
+                    el = await page.query_selector(selector)
+                    if el:
+                        await el.fill(str(email), timeout=4000)
+                        filled_email = True
+                        break
+                except Exception:
+                    continue
+            if not filled_email:
+                try:
+                    first_input = await page.query_selector("input")
+                    if first_input:
+                        await first_input.fill(str(email))
+                        filled_email = True
+                except Exception:
+                    pass
             if not filled_email:
                 await _capture_login_error_screenshot(page, "email_not_found")
                 return {
@@ -752,35 +738,24 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                     "cookies": None,
                     "username": None,
                 }
-            await _dispatch_vue_input_events(
-                page,
-                [
-                    'input[type="email"]',
-                    'input.passport--email-ipt',
-                    '.passport--email-item input.passport--email-ipt',
-                    '.passport--email-item input.passport--form-ipt',
-                    'input[placeholder*="E-mail"]',
-                    'input[placeholder*="Email"]',
-                    'input[placeholder*="Почта"]',
-                    'input[placeholder*="имя пользователя"]',
-                    'input.passport--form-ipt',
-                ],
-            )
 
             logger.info("[SHOP] 🔒 Вводим пароль")
-            filled_pass = await _fill_first_input(
-                page,
-                [
-                    'input[type="password"]',
-                    'input.passport--password-ipt',
-                    '.passport--email-item input.passport--password-ipt',
-                    '.passport--email-item input[type="password"]',
-                    'input[placeholder*="текущий пароль"]',
-                    'input[placeholder*="Пароль"]',
-                    'input[placeholder*="Password"]',
-                ],
-                password,
-            )
+            filled_pass = False
+            for selector in [
+                'input[name="password"]',
+                'input[type="password"]',
+                "input#password",
+                'input[placeholder*="Password"]',
+                'input[autocomplete="current-password"]',
+            ]:
+                try:
+                    el = await page.query_selector(selector)
+                    if el:
+                        await el.fill(str(password), timeout=4000)
+                        filled_pass = True
+                        break
+                except Exception:
+                    continue
             if not filled_pass:
                 await _capture_login_error_screenshot(page, "password_not_found")
                 return {
@@ -790,84 +765,95 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                     "cookies": None,
                     "username": None,
                 }
-            await _dispatch_vue_input_events(
-                page,
-                [
-                    'input[type="password"]',
-                    'input.passport--password-ipt',
-                    '.passport--email-item input.passport--password-ipt',
-                    '.passport--email-item input[type="password"]',
-                    'input[placeholder*="текущий пароль"]',
-                    'input[placeholder*="Пароль"]',
-                    'input[placeholder*="Password"]',
-                ],
-            )
 
             logger.info("[SHOP] ✅ Нажимаем кнопку входа")
-            await _accept_cookies(page)
-            login_button_selectors = [
-                "a.passport--passport-common-btn.passport--yellow",
-            ]
-            clicked = await _click_login_button(page, login_button_selectors)
-            if not clicked:
-                await _capture_login_error_screenshot(page, "login_button_not_found")
-                return {
-                    "success": False,
-                    "error": "Не удалось найти кнопку входа.",
-                    "uid": None,
-                    "cookies": None,
-                    "username": None,
-                }
-            await page.wait_for_timeout(7000)
-
-            login_success = await _wait_for_login_success(page, context, timeout_ms=30000)
-            if not login_success:
-                logger.info("[SHOP] 🔁 Пробуем вызвать Vue login() напрямую.")
-                invoked = await _try_vue_login(page, login_button_selectors)
-                if invoked:
-                    login_success = await _wait_for_login_success(page, context, timeout_ms=20000)
-
-            if not login_success:
-                await _capture_login_error_screenshot(page, "login_failed")
-                logger.error("[SHOP] ❌ Не удалось дождаться подтверждения входа.")
-                return {
-                    "success": False,
-                    "error": "Не удалось дождаться подтверждения входа.",
-                    "uid": None,
-                    "cookies": None,
-                    "username": None,
-                }
-            # 🔐 закрываем passport-окно
-            closed = await _close_passport_frame(page)
-            logger.info(
-                "[SHOP] ❌ Закрываю окно passport: %s",
-                "OK" if closed else "НЕ НАЙДЕНО",
-            )
-
-            if closed:
-                logger.info("[SHOP] ⏳ Ждём обновление страницы после закрытия passport")
+            clicked = False
+            for selector in [
+                'button[type="submit"]',
+                'button:has-text("Sign In")',
+                'button:has-text("Log In")',
+                'button:has-text("登录")',
+                'button:has-text("Sign in")',
+                'button:has-text("Log in")',
+                'input[type="submit"]',
+            ]:
                 try:
-                    await page.wait_for_load_state("domcontentloaded", timeout=10000)
-                except PlaywrightTimeout:
+                    btn = await page.query_selector(selector)
+                    if btn:
+                        await btn.click()
+                        clicked = True
+                        break
+                except Exception:
+                    continue
+
+            if not clicked:
+                try:
+                    await page.keyboard.press("Enter")
+                except Exception:
                     pass
 
-                # даём SPA дорендерить userbar
-                await page.wait_for_timeout(2500)
-
-                logger.info("[SHOP] ⏳ Ждём появления ника игрока")
-                await _wait_for_username(page, timeout_ms=12000)
-
-            # 🧪 debug-скрин ПОСЛЕ всех ожиданий
-            await _capture_login_error_screenshot(page, "after_passport_closed")
-
-            # ✅ парсим ОДИН раз
-            parsed_uid, parsed_username = await _extract_userbar_info(page)
+            await page.wait_for_timeout(7000)
+            try:
+                if await page.locator("text=Accept All").count() > 0:
+                    await page.locator("text=Accept All").click(timeout=3000)
+                elif await page.locator("text=Принять все").count() > 0:
+                    await page.locator("text=Принять все").click(timeout=3000)
+            except Exception:
+                pass
 
             logger.info("[SHOP] 🔎 Проверяем cookies после входа")
-            cookies_list = await context.cookies()
-            cookies_result = {c["name"]: c["value"] for c in cookies_list}
-            token = cookies_result.get("gpc_sso_token")
+            cookies_result: dict[str, str] = {}
+            token: str | None = None
+            start_time = time.time()
+            while time.time() - start_time < 10.0:
+                cookies_list = await context.cookies()
+                cookies_result = {c["name"]: c["value"] for c in cookies_list}
+                token = cookies_result.get("gpc_sso_token")
+                if token and "PHPSESSID" in cookies_result and "RT" in cookies_result:
+                    break
+                await asyncio.sleep(0.5)
+
             uid = jwt_get_uid(token) if token else None
+            if not uid:
+                try:
+                    await page.goto("https://castleclash.igg.com", timeout=15000)
+                    await asyncio.sleep(2)
+                    for _ in range(5):
+                        cookies_list = await context.cookies()
+                        cookies_result = {c["name"]: c["value"] for c in cookies_list}
+                        token = cookies_result.get("gpc_sso_token")
+                        if token:
+                            uid = jwt_get_uid(token)
+                            break
+                        await asyncio.sleep(0.5)
+                except Exception:
+                    pass
+
+            logger.info("[SHOP] 🌍 Открываем страницу магазина после логина")
+            await open_shop_page_with_retry(page, "https://castleclash.igg.com/shop/")
+            await _clear_page_storage(page)
+            await _accept_cookies(page)
+            if await _is_access_denied(page):
+                await _capture_login_error_screenshot(page, "access_denied")
+                return {
+                    "success": False,
+                    "error": "Access Denied при открытии страницы (возможна блокировка по IP).",
+                    "uid": None,
+                    "cookies": cookies_result,
+                    "username": None,
+                }
+            await humanize_pre_action(page)
+
+            try:
+                await wait_shop_ready(page)
+            except PlaywrightTimeout as exc:
+                logger.error("[SHOP] ❌ Таймаут полной загрузки магазина: %s", exc)
+            except Exception as exc:
+                logger.error("[SHOP] ❌ Ошибка ожидания полной готовности магазина: %s", exc)
+
+            await _wait_for_username(page, timeout_ms=12000)
+            parsed_uid, parsed_username = await _extract_userbar_info(page)
+
             if parsed_uid and not uid:
                 uid = parsed_uid
             if not uid:
@@ -881,12 +867,6 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                 }
 
             logger.info("[SHOP] ✅ Вход успешен, UID=%s", uid)
-            try:
-                await wait_shop_ready(page)
-            except PlaywrightTimeout as exc:
-                logger.error("[SHOP] ❌ Таймаут полной загрузки магазина: %s", exc)
-            except Exception as exc:
-                logger.error("[SHOP] ❌ Ошибка ожидания полной готовности магазина: %s", exc)
             return {
                 "success": True,
                 "error": None,
