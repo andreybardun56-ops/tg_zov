@@ -361,6 +361,19 @@ async def _click_login_button(page: Page, selectors: list[str]) -> bool:
                     return True
                 except Exception as exc:
                     logger.debug("[SHOP] JS login click failed (%s): %s", selector, exc)
+                try:
+                    await locator.first.dispatch_event("click")
+                    return True
+                except Exception as exc:
+                    logger.debug("[SHOP] Dispatch login click failed (%s): %s", selector, exc)
+
+                try:
+                    handle = await locator.first.element_handle()
+                    if handle:
+                        await page.evaluate("(el) => el?.parentElement?.click()", handle)
+                        return True
+                except Exception as exc:
+                    logger.debug("[SHOP] Parent login click failed (%s): %s", selector, exc)
             except Exception as exc:
                 logger.debug("[SHOP] Login button lookup failed (%s): %s", selector, exc)
     return False
@@ -632,6 +645,8 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                 page,
                 [
                     ".passport--form-ipt-btns a.passport--passport-common-btn.passport--yellow",
+                    "#component_passport .passport--form-ipt-btns",
+                    ".passport--form-ipt-btns",
                     "a.passport--passport-common-btn.passport--yellow:has-text('Вход')",
                     "button.passport--passport-common-btn.passport--yellow",
                     "button:has-text('Вход')",
@@ -883,6 +898,8 @@ async def complete_shop_login_igg(
             page,
             [
                 "a.passport--passport-common-btn.passport--yellow",
+                "#component_passport .passport--form-ipt-btns",
+                ".passport--form-ipt-btns",
                 "a.passport--passport-common-btn.passport--yellow:has-text('Вход')",
                 "button.passport--passport-common-btn.passport--yellow",
                 "button:has-text('Вход')",
