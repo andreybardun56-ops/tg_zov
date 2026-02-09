@@ -8,7 +8,13 @@ import re
 import time
 from datetime import datetime
 from typing import Any, TypedDict
-from playwright.async_api import BrowserContext, Page, Playwright, TimeoutError as PlaywrightTimeout
+from playwright.async_api import (
+    BrowserContext,
+    Locator,
+    Page,
+    Playwright,
+    TimeoutError as PlaywrightTimeout,
+)
 from services.logger import logger
 from services.browser_patches import (
     BROWSER_PATH,
