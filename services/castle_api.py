@@ -140,6 +140,7 @@ MVP_READY_SELECTOR = ".user__infos-item"
 
 async def wait_shop_ready(page: Page, timeout: int = 60000, attempts: int = 2) -> None:
     deadline = time.monotonic() + (timeout / 1000)
+
     def _remaining_ms() -> int:
         return int(max(0, (deadline - time.monotonic()) * 1000))
 
@@ -189,11 +190,12 @@ async def wait_shop_ready(page: Page, timeout: int = 60000, attempts: int = 2) -
             if await _has_userbar():
                 logger.info("[SHOP] Userbar present after readiness attempts.")
                 return
-            logger.warning("[SHOP] ⚠️ Готовность магазина не подтверждена, попытка %s/%s.", attempt, attempts)
+            logger.warning(
+                "[SHOP] ⚠️ Готовность магазина не подтверждена, попытка %s/%s.",
+                attempt,
+                attempts,
+            )
             await asyncio.sleep(jitter(1.0, 0.5))
-
-    logger.warning("[SHOP] No readiness selector appeared within timeout.")
-    raise PlaywrightTimeout("Shop readiness selector not found within timeout.")
 
 
 async def wait_mvp_ready(page: Page, timeout: int = 60000) -> None:
@@ -490,30 +492,32 @@ async def _click_login_button(page: Page, selectors: list[str]) -> bool:
     return False
 
 
-async def _close_passport_frame(page: Page) -> None:
-    selectors = [
-        "#component_passport .passport--frame-close",
-        ".passport--container-outer .passport--frame-close",
-        "div.passport--frame-close",
-    ]
-    for selector in selectors:
-        try:
-            locator = page.locator(selector)
-            if await locator.count() > 0 and await locator.first.is_visible():
-                await locator.first.click(timeout=3000)
-                return
-        except Exception as exc:
-            logger.debug("[SHOP] Passport close failed (%s): %s", selector, exc)
-
-    for frame in page.frames:
-        for selector in selectors:
-            try:
-                locator = frame.locator(selector)
-                if await locator.count() > 0 and await locator.first.is_visible():
-                    await locator.first.click(timeout=3000)
-                    return
-            except Exception as exc:
-                logger.debug("[SHOP] Passport frame close failed (%s): %s", selector, exc)
+async def _close_passport_frame(page: Page) -> bool:
+    try:
+        closed = await page.evaluate(
+            """
+        () => {
+            const selectors = [
+                '.passport--frame-close',
+                '.passport--container-outer .passport--frame-close',
+                '#component_passport .passport--frame-close'
+            ];
+            for (const sel of selectors) {
+                const btn = document.querySelector(sel);
+                if (btn) {
+                    btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                    btn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+                    btn.click();
+                    return true;
+                }
+            }
+            return false;
+        }
+        """
+        )
+        return bool(closed)
+    except Exception:
+        return False
 
 
 async def _extract_userbar_info(page: Page) -> tuple[str | None, str | None]:
@@ -543,24 +547,25 @@ async def _extract_userbar_info(page: Page) -> tuple[str | None, str | None]:
             logger.debug("[SHOP] Username lookup failed (%s): %s", selector, exc)
 
     try:
-        userbar = page.locator("#userBar, .userbar").first
-        if await userbar.count() > 0:
-            text = (await userbar.inner_text()).strip()
-            if text:
-                match = re.search(r"\b\d{6,12}\b", text)
-                if match:
-                    uid = match.group(0)
-                if not username:
-                    lines = [line.strip() for line in text.splitlines() if line.strip()]
-                    for line in lines:
-                        if "IGG" in line or "ID" in line:
-                            continue
-                        if re.search(r"\b\d{6,12}\b", line):
-                            continue
-                        username = line
-                        break
+        info = page.locator(".userbar-info.after-login").first
+        if await info.count() > 0 and await info.is_visible():
+            items = info.locator(".user__infos-item")
+            for i in range(await items.count()):
+                text = (await items.nth(i).inner_text()).strip()
+
+                # UID
+                if "IGG ID" in text:
+                    m = re.search(r"\b\d{6,12}\b", text)
+                    if m:
+                        uid = m.group(0)
+
+                # USERNAME
+                if "Имя игрока" in text:
+                    m = re.search(r"Имя игрока[:：]?\s*(.+)", text)
+                    if m:
+                        username = m.group(1).strip()
     except Exception as exc:
-        logger.debug("[SHOP] Userbar parse failed: %s", exc)
+        logger.debug("[SHOP] Userbar-info parse failed: %s", exc)
 
     return uid, username
 
@@ -570,7 +575,9 @@ async def _capture_login_error_screenshot(page: Page | None, tag: str) -> str | 
         return None
     try:
         if page.is_closed():
-            logger.warning("[SHOP] ⚠️ Не удалось сделать скриншот ошибки: page already closed.")
+            logger.warning(
+                "[SHOP] ⚠️ Не удалось сделать скриншот ошибки: page already closed."
+            )
             return None
         screenshots_dir = os.path.join("logs", "screenshots", f"{datetime.now():%Y-%m-%d}")
         os.makedirs(screenshots_dir, exist_ok=True)
@@ -620,6 +627,25 @@ async def _wait_for_login_form(page: Page, timeout: int = 15000) -> bool:
     return False
 
 
+async def _wait_for_username(page: Page, timeout_ms: int = 10000) -> bool:
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        try:
+            locators = page.locator(".userbar .infos-item-txt")
+            count = await locators.count()
+            for idx in range(count):
+                text = (await locators.nth(idx).inner_text()).strip()
+                if not text:
+                    continue
+                if text in {"IGG ID", "Авторизация"}:
+                    continue
+                return True
+        except Exception as exc:
+            logger.debug("[SHOP] Username wait failed: %s", exc)
+        await page.wait_for_timeout(300)
+    return False
+
+
 async def login_shop_email(email: str, password: str) -> dict[str, Any]:
     """
     Авторизация на https://castleclash.igg.com/shop/ через email+пароль.
@@ -629,6 +655,7 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
     page: Page | None = None
     try:
         from playwright.async_api import async_playwright
+
         async with async_playwright() as p:
             profile = get_random_browser_profile()
             profile.update(
@@ -792,7 +819,6 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                     "username": None,
                 }
             await page.wait_for_timeout(7000)
-            await _capture_login_error_screenshot(page, "after_login_click_delay")
 
             login_success = await _wait_for_login_success(page, context, timeout_ms=30000)
             if not login_success:
@@ -811,8 +837,30 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                     "cookies": None,
                     "username": None,
                 }
+            # 🔐 закрываем passport-окно
+            closed = await _close_passport_frame(page)
+            logger.info(
+                "[SHOP] ❌ Закрываю окно passport: %s",
+                "OK" if closed else "НЕ НАЙДЕНО",
+            )
 
-            # await _close_passport_frame(page)
+            if closed:
+                logger.info("[SHOP] ⏳ Ждём обновление страницы после закрытия passport")
+                try:
+                    await page.wait_for_load_state("domcontentloaded", timeout=10000)
+                except PlaywrightTimeout:
+                    pass
+
+                # даём SPA дорендерить userbar
+                await page.wait_for_timeout(2500)
+
+                logger.info("[SHOP] ⏳ Ждём появления ника игрока")
+                await _wait_for_username(page, timeout_ms=12000)
+
+            # 🧪 debug-скрин ПОСЛЕ всех ожиданий
+            await _capture_login_error_screenshot(page, "after_passport_closed")
+
+            # ✅ парсим ОДИН раз
             parsed_uid, parsed_username = await _extract_userbar_info(page)
 
             logger.info("[SHOP] 🔎 Проверяем cookies после входа")
@@ -874,6 +922,7 @@ async def start_shop_login_igg(igg_id: str) -> dict[str, Any]:
     """
     ctx: ShopContext | None = None
     playwright: Playwright | None = None
+
     async def _cleanup() -> None:
         try:
             if ctx:
@@ -883,8 +932,10 @@ async def start_shop_login_igg(igg_id: str) -> dict[str, Any]:
                 await playwright.stop()
         except Exception as exc:
             logger.debug("[SHOP] Cleanup failed after IGG login: %s", exc)
+
     try:
         from playwright.async_api import async_playwright
+
         playwright = await async_playwright().start()
         profile = get_random_browser_profile()
         logger.info("[SHOP] ▶ Запуск браузера для входа по IGG ID")
@@ -1119,6 +1170,7 @@ async def complete_shop_login_igg(
             except Exception as exc:
                 logger.debug("[SHOP] Cleanup failed after IGG code: %s", exc)
 
+
 # ───────────────────────────────────────────────
 # 🔄 Обновление cookies через MVP (через browser_patches)
 # ───────────────────────────────────────────────
@@ -1147,6 +1199,7 @@ async def refresh_cookies_mvp(user_id: str, uid: str) -> dict[str, Any]:
 
     try:
         from playwright.async_api import async_playwright
+
         async with async_playwright() as p:
             profile = get_random_browser_profile()
             ctx = await launch_masked_persistent_context(
@@ -1229,7 +1282,7 @@ def extract_reward_from_response(text: str) -> str | None:
     except Exception as exc:
         logger.debug("[MVP] Reward parse failed: %s", exc)
 
-    match = re.search(r'奖励[:： ]*([^"<>{}\n\r]+)', text)
+    match = re.search(r"奖励[:： ]*([^\"<>{}\n\r]+)", text)
     if match:
         return match.group(1).strip()
 
@@ -1238,6 +1291,7 @@ def extract_reward_from_response(text: str) -> str | None:
         return match2.group(1).strip()
 
     return None
+
 
 # ───────────────────────────────────────────────
 # 🌐 Извлечение IGG ID и имени со страницы MVP (через browser_patches)
@@ -1253,6 +1307,7 @@ async def extract_player_info_from_page(url: str) -> PlayerInfoResult:
     ctx: ShopContext | None = None
 
     from playwright.async_api import async_playwright
+
     try:
         async with async_playwright() as p:
             profile = get_random_browser_profile()
