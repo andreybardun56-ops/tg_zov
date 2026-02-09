@@ -10,7 +10,6 @@ from datetime import datetime
 from typing import Any, TypedDict
 from playwright.async_api import (
     BrowserContext,
-    Locator,
     Page,
     Playwright,
     TimeoutError as PlaywrightTimeout,
@@ -317,52 +316,17 @@ async def _clear_page_storage(page: Page) -> None:
 
 
 async def _click_login_button(page: Page, selectors: list[str]) -> bool:
-    try:
-        await page.locator(".passport--container-outer").wait_for(state="hidden", timeout=3000)
-    except PlaywrightTimeout:
-        pass
-    except Exception as exc:
-        logger.debug("[SHOP] Login overlay wait failed: %s", exc)
-
     for selector in selectors:
-        contexts = [page, *page.frames]
-        for ctx in contexts:
-            try:
-                locator: Locator = ctx.locator(selector)
-                if await locator.count() == 0:
-                    continue
-                await locator.first.scroll_into_view_if_needed(timeout=3000)
-                if hasattr(locator, "is_enabled") and not await locator.first.is_enabled():
-                    try:
-                        await locator.first.wait_for(state="visible", timeout=3000)
-                    except PlaywrightTimeout:
-                        pass
-                try:
-                    await locator.first.click(timeout=5000)
-                    return True
-                except PlaywrightTimeout as exc:
-                    logger.warning("[SHOP] Login click timeout (%s), trying fallback: %s", selector, exc)
-                except Exception as exc:
-                    logger.warning("[SHOP] Login click failed (%s), trying fallback: %s", selector, exc)
-
-                try:
-                    await _close_passport_frame(page)
-                except Exception as exc:
-                    logger.debug("[SHOP] Login click fallback close failed: %s", exc)
-
-                try:
-                    await locator.first.click(timeout=5000, force=True)
-                    return True
-                except Exception as exc:
-                    logger.debug("[SHOP] Forced login click failed (%s): %s", selector, exc)
-
-                try:
-                    await page.evaluate("(el) => el.click()", await locator.first.element_handle())
-                    return True
-                except Exception as exc:
-                    logger.debug("[SHOP] JS login click failed (%s): %s", selector, exc)
-            except Exception as exc:
-                logger.debug("[SHOP] Login button lookup failed (%s): %s", selector, exc)
+        try:
+            await page.wait_for_selector(selector, state="visible", timeout=8000)
+            btn = page.locator(selector).first
+            await btn.scroll_into_view_if_needed()
+            await btn.click(timeout=5000)
+            return True
+        except PlaywrightTimeout as exc:
+            logger.debug("[SHOP] Login button timeout (%s): %s", selector, exc)
+        except Exception as exc:
+            logger.debug("[SHOP] Login button failed (%s): %s", selector, exc)
     return False
 
 
@@ -632,6 +596,8 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                 page,
                 [
                     ".passport--form-ipt-btns a.passport--passport-common-btn.passport--yellow",
+                    "#component_passport .passport--form-ipt-btns",
+                    ".passport--form-ipt-btns",
                     "a.passport--passport-common-btn.passport--yellow:has-text('Вход')",
                     "button.passport--passport-common-btn.passport--yellow",
                     "button:has-text('Вход')",
@@ -651,7 +617,7 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                 await _capture_login_error_screenshot(page, "login_failed")
                 logger.error("[SHOP] ❌ Ошибка ожидания подтверждения входа: %s", exc)
 
-            await _close_passport_frame(page)
+            # await _close_passport_frame(page)
             parsed_uid, parsed_username = await _extract_userbar_info(page)
 
             logger.info("[SHOP] 🔎 Проверяем cookies после входа")
@@ -883,6 +849,8 @@ async def complete_shop_login_igg(
             page,
             [
                 "a.passport--passport-common-btn.passport--yellow",
+                "#component_passport .passport--form-ipt-btns",
+                ".passport--form-ipt-btns",
                 "a.passport--passport-common-btn.passport--yellow:has-text('Вход')",
                 "button.passport--passport-common-btn.passport--yellow",
                 "button:has-text('Вход')",
@@ -907,7 +875,7 @@ async def complete_shop_login_igg(
         except Exception as exc:
             logger.debug("[SHOP] Userbar wait failed after IGG login: %s", exc)
 
-        await _close_passport_frame(page)
+        # await _close_passport_frame(page)
         parsed_uid, parsed_username = await _extract_userbar_info(page)
 
         cookies_list = await context.cookies()
