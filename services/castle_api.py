@@ -640,21 +640,38 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
 
             logger.info("[SHOP] ✅ Нажимаем кнопку входа")
             await _accept_cookies(page)
-            clicked = await _click_login_button(
-                page,
-                [
-                    ".passport--form-ipt-btns a.passport--passport-common-btn.passport--yellow",
-                    "#component_passport .passport--form-ipt-btns",
-                    ".passport--form-ipt-btns",
-                    "a.passport--passport-common-btn.passport--yellow:has-text('Вход')",
-                    "button.passport--passport-common-btn.passport--yellow",
-                    "button:has-text('Вход')",
-                    "input[type='submit']",
-                ],
-            )
-            if not clicked:
-                logger.warning("[SHOP] Не удалось нажать кнопку входа, пробуем Enter.")
+            login_button_selectors = [
+                ".passport--form-ipt-btns a.passport--passport-common-btn.passport--yellow",
+                "#component_passport .passport--form-ipt-btns",
+                ".passport--form-ipt-btns",
+                "a.passport--passport-common-btn.passport--yellow:has-text('Вход')",
+                "button.passport--passport-common-btn.passport--yellow",
+                "button:has-text('Вход')",
+                "input[type='submit']",
+            ]
+            try:
+                logger.info("[SHOP] ↩️ Пробуем отправить форму входа через Enter")
+                try:
+                    await page.locator("input.passport--password-ipt, input[type=\"password\"]").first.focus()
+                except Exception as exc:
+                    logger.warning("[SHOP] Не удалось сфокусировать поле пароля перед Enter: %s", exc)
                 await page.keyboard.press("Enter")
+                await page.wait_for_timeout(1500)
+                if await _is_login_form_visible(
+                    page,
+                    [
+                        ".passport--form-ipt",
+                        "input.passport--password-ipt",
+                        "input[type=\"password\"]",
+                    ],
+                ):
+                    raise RuntimeError("login form still visible after Enter")
+                logger.info("[SHOP] ✅ Enter отправил форму входа")
+            except Exception as exc:
+                logger.warning("[SHOP] ⚠️ Enter не отправил форму, пробуем кликнуть кнопку входа: %s", exc)
+                clicked = await _click_login_button(page, login_button_selectors)
+                if not clicked:
+                    logger.warning("[SHOP] Не удалось нажать кнопку входа.")
 
             try:
                 await page.wait_for_selector("#userBar", state="visible", timeout=30000)
@@ -893,21 +910,41 @@ async def complete_shop_login_igg(
                 "username": None,
             }
 
-        clicked = await _click_login_button(
-            page,
-            [
-                "a.passport--passport-common-btn.passport--yellow",
-                "#component_passport .passport--form-ipt-btns",
-                ".passport--form-ipt-btns",
-                "a.passport--passport-common-btn.passport--yellow:has-text('Вход')",
-                "button.passport--passport-common-btn.passport--yellow",
-                "button:has-text('Вход')",
-                "input[type='submit']",
-            ],
-        )
-        if not clicked:
-            logger.warning("[SHOP] Не удалось нажать кнопку входа, пробуем Enter.")
+        login_button_selectors = [
+            "a.passport--passport-common-btn.passport--yellow",
+            "#component_passport .passport--form-ipt-btns",
+            ".passport--form-ipt-btns",
+            "a.passport--passport-common-btn.passport--yellow:has-text('Вход')",
+            "button.passport--passport-common-btn.passport--yellow",
+            "button:has-text('Вход')",
+            "input[type='submit']",
+        ]
+        try:
+            logger.info("[SHOP] ↩️ Пробуем отправить форму входа через Enter")
+            try:
+                await page.locator(
+                    "input.passport--password-ipt, input[placeholder*=\"Код\"], input[type=\"text\"]",
+                ).first.focus()
+            except Exception as exc:
+                logger.warning("[SHOP] Не удалось сфокусировать поле кода перед Enter: %s", exc)
             await page.keyboard.press("Enter")
+            await page.wait_for_timeout(1500)
+            if await _is_login_form_visible(
+                page,
+                [
+                    ".passport--form-ipt",
+                    "input.passport--password-ipt",
+                    "input[placeholder*=\"Код\"]",
+                    "input[type=\"text\"]",
+                ],
+            ):
+                raise RuntimeError("login form still visible after Enter")
+            logger.info("[SHOP] ✅ Enter отправил форму входа")
+        except Exception as exc:
+            logger.warning("[SHOP] ⚠️ Enter не отправил форму, пробуем кликнуть кнопку входа: %s", exc)
+            clicked = await _click_login_button(page, login_button_selectors)
+            if not clicked:
+                logger.warning("[SHOP] Не удалось нажать кнопку входа.")
 
         await _accept_cookies(page)
 
