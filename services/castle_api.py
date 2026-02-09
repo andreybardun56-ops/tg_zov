@@ -303,13 +303,6 @@ async def _fill_first_input(page: Page, selectors: list[str], value: str) -> boo
     return False
 
 
-async def _clear_page_storage(page: Page) -> None:
-    try:
-        await page.evaluate("() => { localStorage.clear(); sessionStorage.clear(); }")
-    except Exception as exc:
-        logger.debug("[SHOP] Storage clear failed: %s", exc)
-
-
 async def _close_passport_frame(page: Page) -> None:
     selectors = [
         "#component_passport .passport--frame-close",
