@@ -316,6 +316,48 @@ async def _clear_page_storage(page: Page) -> None:
         logger.debug("[SHOP] Storage clear failed: %s", exc)
 
 
+async def _click_login_button(page: Page, locator: Locator) -> bool:
+    try:
+        if await locator.count() == 0:
+            return False
+    except Exception as exc:
+        logger.debug("[SHOP] Login button lookup failed: %s", exc)
+        return False
+
+    try:
+        await page.locator(".passport--container-outer").wait_for(state="hidden", timeout=3000)
+    except PlaywrightTimeout:
+        pass
+    except Exception as exc:
+        logger.debug("[SHOP] Login overlay wait failed: %s", exc)
+
+    try:
+        await locator.first.click(timeout=5000)
+        return True
+    except PlaywrightTimeout as exc:
+        logger.warning("[SHOP] Login click timeout, trying fallback: %s", exc)
+    except Exception as exc:
+        logger.warning("[SHOP] Login click failed, trying fallback: %s", exc)
+
+    try:
+        await _close_passport_frame(page)
+    except Exception as exc:
+        logger.debug("[SHOP] Login click fallback close failed: %s", exc)
+
+    try:
+        await locator.first.click(timeout=5000, force=True)
+        return True
+    except Exception as exc:
+        logger.debug("[SHOP] Forced login click failed: %s", exc)
+
+    try:
+        await page.evaluate("(el) => el.click()", await locator.first.element_handle())
+        return True
+    except Exception as exc:
+        logger.debug("[SHOP] JS login click failed: %s", exc)
+        return False
+
+
 async def _close_passport_frame(page: Page) -> None:
     selectors = [
         "#component_passport .passport--frame-close",
