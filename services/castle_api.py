@@ -323,6 +323,7 @@ async def _click_login_button(page: Page, selectors: list[str]) -> bool:
     except Exception as exc:
         logger.debug("[SHOP] Login overlay wait failed: %s", exc)
 
+    found_any = False
     for selector in selectors:
         contexts = [page, *page.frames]
         for ctx in contexts:
@@ -330,6 +331,7 @@ async def _click_login_button(page: Page, selectors: list[str]) -> bool:
                 locator: Locator = ctx.locator(selector)
                 if await locator.count() == 0:
                     continue
+                found_any = True
                 await locator.first.scroll_into_view_if_needed(timeout=3000)
                 if hasattr(locator, "is_enabled") and not await locator.first.is_enabled():
                     try:
@@ -337,44 +339,26 @@ async def _click_login_button(page: Page, selectors: list[str]) -> bool:
                     except PlaywrightTimeout:
                         pass
                 try:
-                    await locator.first.click(timeout=5000)
-                    return True
-                except PlaywrightTimeout as exc:
-                    logger.warning("[SHOP] Login click timeout (%s), trying fallback: %s", selector, exc)
-                except Exception as exc:
-                    logger.warning("[SHOP] Login click failed (%s), trying fallback: %s", selector, exc)
-
-                try:
-                    await _close_passport_frame(page)
-                except Exception as exc:
-                    logger.debug("[SHOP] Login click fallback close failed: %s", exc)
-
-                try:
-                    await locator.first.click(timeout=5000, force=True)
-                    return True
-                except Exception as exc:
-                    logger.debug("[SHOP] Forced login click failed (%s): %s", selector, exc)
-
-                try:
-                    await page.evaluate("(el) => el.click()", await locator.first.element_handle())
+                    await locator.first.evaluate(
+                        """(el) => {
+                            const events = ["mousedown", "mouseup", "click"];
+                            for (const type of events) {
+                                const event = new MouseEvent(type, {
+                                    bubbles: true,
+                                    cancelable: true,
+                                    view: window,
+                                });
+                                el.dispatchEvent(event);
+                            }
+                        }""",
+                    )
                     return True
                 except Exception as exc:
-                    logger.debug("[SHOP] JS login click failed (%s): %s", selector, exc)
-                try:
-                    await locator.first.dispatch_event("click")
-                    return True
-                except Exception as exc:
-                    logger.debug("[SHOP] Dispatch login click failed (%s): %s", selector, exc)
-
-                try:
-                    handle = await locator.first.element_handle()
-                    if handle:
-                        await page.evaluate("(el) => el?.parentElement?.click()", handle)
-                        return True
-                except Exception as exc:
-                    logger.debug("[SHOP] Parent login click failed (%s): %s", selector, exc)
+                    logger.warning("[SHOP] Dispatch login click failed (%s): %s", selector, exc)
             except Exception as exc:
                 logger.debug("[SHOP] Login button lookup failed (%s): %s", selector, exc)
+    if not found_any:
+        logger.error("[SHOP] Не найдена кнопка входа для клика.")
     return False
 
 
@@ -641,46 +625,41 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
             logger.info("[SHOP] ✅ Нажимаем кнопку входа")
             await _accept_cookies(page)
             login_button_selectors = [
-                ".passport--form-ipt-btns a.passport--passport-common-btn.passport--yellow",
-                "#component_passport .passport--form-ipt-btns",
-                ".passport--form-ipt-btns",
-                "a.passport--passport-common-btn.passport--yellow:has-text('Вход')",
-                "button.passport--passport-common-btn.passport--yellow",
-                "button:has-text('Вход')",
-                "input[type='submit']",
+                "a.passport--passport-common-btn.passport--yellow",
             ]
-            try:
-                logger.info("[SHOP] ↩️ Пробуем отправить форму входа через Enter")
-                try:
-                    await page.locator("input.passport--password-ipt, input[type=\"password\"]").first.focus()
-                except Exception as exc:
-                    logger.warning("[SHOP] Не удалось сфокусировать поле пароля перед Enter: %s", exc)
-                await page.keyboard.press("Enter")
-                await page.wait_for_timeout(1500)
-                if await _is_login_form_visible(
-                    page,
-                    [
-                        ".passport--form-ipt",
-                        "input.passport--password-ipt",
-                        "input[type=\"password\"]",
-                    ],
-                ):
-                    raise RuntimeError("login form still visible after Enter")
-                logger.info("[SHOP] ✅ Enter отправил форму входа")
-            except Exception as exc:
-                logger.warning("[SHOP] ⚠️ Enter не отправил форму, пробуем кликнуть кнопку входа: %s", exc)
-                clicked = await _click_login_button(page, login_button_selectors)
-                if not clicked:
-                    logger.warning("[SHOP] Не удалось нажать кнопку входа.")
+            clicked = await _click_login_button(page, login_button_selectors)
+            if not clicked:
+                await _capture_login_error_screenshot(page, "login_button_not_found")
+                return {
+                    "success": False,
+                    "error": "Не удалось найти кнопку входа.",
+                    "uid": None,
+                    "cookies": None,
+                    "username": None,
+                }
 
             try:
                 await page.wait_for_selector("#userBar", state="visible", timeout=30000)
             except PlaywrightTimeout:
                 await _capture_login_error_screenshot(page, "login_failed")
                 logger.error("[SHOP] ❌ Не удалось дождаться подтверждения входа (#userBar).")
+                return {
+                    "success": False,
+                    "error": "Не удалось дождаться подтверждения входа (#userBar).",
+                    "uid": None,
+                    "cookies": None,
+                    "username": None,
+                }
             except Exception as exc:
                 await _capture_login_error_screenshot(page, "login_failed")
                 logger.error("[SHOP] ❌ Ошибка ожидания подтверждения входа: %s", exc)
+                return {
+                    "success": False,
+                    "error": "Ошибка ожидания подтверждения входа.",
+                    "uid": None,
+                    "cookies": None,
+                    "username": None,
+                }
 
             # await _close_passport_frame(page)
             parsed_uid, parsed_username = await _extract_userbar_info(page)
@@ -912,39 +891,16 @@ async def complete_shop_login_igg(
 
         login_button_selectors = [
             "a.passport--passport-common-btn.passport--yellow",
-            "#component_passport .passport--form-ipt-btns",
-            ".passport--form-ipt-btns",
-            "a.passport--passport-common-btn.passport--yellow:has-text('Вход')",
-            "button.passport--passport-common-btn.passport--yellow",
-            "button:has-text('Вход')",
-            "input[type='submit']",
         ]
-        try:
-            logger.info("[SHOP] ↩️ Пробуем отправить форму входа через Enter")
-            try:
-                await page.locator(
-                    "input.passport--password-ipt, input[placeholder*=\"Код\"], input[type=\"text\"]",
-                ).first.focus()
-            except Exception as exc:
-                logger.warning("[SHOP] Не удалось сфокусировать поле кода перед Enter: %s", exc)
-            await page.keyboard.press("Enter")
-            await page.wait_for_timeout(1500)
-            if await _is_login_form_visible(
-                page,
-                [
-                    ".passport--form-ipt",
-                    "input.passport--password-ipt",
-                    "input[placeholder*=\"Код\"]",
-                    "input[type=\"text\"]",
-                ],
-            ):
-                raise RuntimeError("login form still visible after Enter")
-            logger.info("[SHOP] ✅ Enter отправил форму входа")
-        except Exception as exc:
-            logger.warning("[SHOP] ⚠️ Enter не отправил форму, пробуем кликнуть кнопку входа: %s", exc)
-            clicked = await _click_login_button(page, login_button_selectors)
-            if not clicked:
-                logger.warning("[SHOP] Не удалось нажать кнопку входа.")
+        clicked = await _click_login_button(page, login_button_selectors)
+        if not clicked:
+            return {
+                "success": False,
+                "error": "Не удалось найти кнопку входа.",
+                "uid": None,
+                "cookies": None,
+                "username": None,
+            }
 
         await _accept_cookies(page)
 
@@ -957,8 +913,22 @@ async def complete_shop_login_igg(
             await page.wait_for_selector("#userBar", state="visible", timeout=30000)
         except PlaywrightTimeout:
             logger.debug("[SHOP] Login success marker #userBar not visible after IGG login.")
+            return {
+                "success": False,
+                "error": "Не удалось дождаться подтверждения входа (#userBar).",
+                "uid": None,
+                "cookies": None,
+                "username": None,
+            }
         except Exception as exc:
             logger.debug("[SHOP] Userbar wait failed after IGG login: %s", exc)
+            return {
+                "success": False,
+                "error": "Ошибка ожидания подтверждения входа.",
+                "uid": None,
+                "cookies": None,
+                "username": None,
+            }
 
         # await _close_passport_frame(page)
         parsed_uid, parsed_username = await _extract_userbar_info(page)
