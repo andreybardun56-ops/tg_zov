@@ -73,7 +73,7 @@ from playwright.async_api import async_playwright
 DATA_DIR = Path("data/data_akk")
 LOG_DIR = Path("data/logs")
 SCREEN_DIR = Path("data/screenshots_dupes")
-DATA_FILE = Path("data/puzzle_duplicates_data.jsonl")
+DATA_FILE = Path("data/puzzle_data.jsonl")
 FAIL_DIR = Path("data/failures_dupes")
 
 # === Настройки ===

@@ -24,6 +24,14 @@ from services.browser_patches import (
 )
 from services.cookies_io import load_all_cookies, save_all_cookies
 from config import COOKIES_FILE
+REQUIRED_COOKIES = {
+    "ak_bmsc",
+    "RT",
+    "PHPSESSID",
+    "locale_ln",
+    "_cookie_privacy_",
+    "gpc_sso_token",
+}
 
 # ───────────────────────────────────────────────
 # 🧱 Работа с cookies.json
@@ -648,7 +656,7 @@ async def _wait_for_username(page: Page, timeout_ms: int = 10000) -> bool:
 
 async def login_shop_email(email: str, password: str) -> dict[str, Any]:
     """
-    Авторизация на https://castleclash.igg.com/shop/ через email+пароль.
+    Авторизация на https://castleclash.igg.com/ через email+пароль.
     Возвращает cookies и uid (если найден).
     """
     ctx: ShopContext | None = None
@@ -693,11 +701,11 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
             )
             try:
                 if await page.locator("#onetrust-accept-btn-handler").count() > 0:
-                    await page.locator("#onetrust-accept-btn-handler").click(timeout=3000)
+                    await page.locator("#onetrust-accept-btn-handler").click(timeout=1500)
                 elif await page.locator("text=Accept All").count() > 0:
-                    await page.locator("text=Accept All").click(timeout=3000)
+                    await page.locator("text=Accept All").click(timeout=1500)
                 elif await page.locator("text=Принять все").count() > 0:
-                    await page.locator("text=Принять все").click(timeout=3000)
+                    await page.locator("text=Принять все").click(timeout=1500)
             except Exception:
                 pass
             await humanize_pre_action(page)
@@ -716,7 +724,7 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                 try:
                     el = await page.query_selector(selector)
                     if el:
-                        await el.fill(str(email), timeout=4000)
+                        await el.fill(str(email), timeout=2000)
                         filled_email = True
                         break
                 except Exception:
@@ -751,7 +759,7 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                 try:
                     el = await page.query_selector(selector)
                     if el:
-                        await el.fill(str(password), timeout=4000)
+                        await el.fill(str(password), timeout=2000)
                         filled_pass = True
                         break
                 except Exception:
@@ -792,28 +800,35 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                 except Exception:
                     pass
 
-            await page.wait_for_timeout(7000)
-            try:
-                if await page.locator("text=Accept All").count() > 0:
-                    await page.locator("text=Accept All").click(timeout=3000)
-                elif await page.locator("text=Принять все").count() > 0:
-                    await page.locator("text=Принять все").click(timeout=3000)
-            except Exception:
-                pass
-
             logger.info("[SHOP] 🔎 Проверяем cookies после входа")
             cookies_result: dict[str, str] = {}
             token: str | None = None
             start_time = time.time()
-            while time.time() - start_time < 10.0:
+            cookies_result = {}
+            token = None
+
+            while time.time() - start_time < 15.0:
                 cookies_list = await context.cookies()
                 cookies_result = {c["name"]: c["value"] for c in cookies_list}
-                token = cookies_result.get("gpc_sso_token")
-                if token and "PHPSESSID" in cookies_result and "RT" in cookies_result:
+
+                missing = REQUIRED_COOKIES - cookies_result.keys()
+
+                logger.debug(
+                    "[SHOP] Cookies present: %s | missing: %s",
+                    list(cookies_result.keys()),
+                    list(missing),
+                )
+
+                if not missing:
+                    token = cookies_result.get("gpc_sso_token")
                     break
+
                 await asyncio.sleep(0.5)
 
-            uid = jwt_get_uid(token) if token else None
+            uid = None
+            if token and token.count(".") == 2:
+                uid = jwt_get_uid(token)
+
             if not uid:
                 try:
                     await page.goto("https://castleclash.igg.com", timeout=15000)

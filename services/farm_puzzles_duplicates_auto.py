@@ -20,8 +20,8 @@ from services.event_checker import (
 )
 from services.logger import logger
 
-DUPES_SUMMARY = "data/puzzle_duplicates_summary.json"
-DUPES_DATA = "data/puzzle_duplicates_data.jsonl"
+DUPES_SUMMARY = "data/puzzle_summary.json"
+DUPES_DATA = "data/puzzle_data.jsonl"
 
 IS_FARM_RUNNING = False
 FARM_TASK: Optional[asyncio.Task] = None

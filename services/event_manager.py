@@ -28,7 +28,6 @@ from playwright.async_api import async_playwright
 logger = logging.getLogger("event_manager")
 
 EVENT_HANDLERS = {
-    "puzzle2": run_puzzle2_all_sources,
     "flop_pair": run_flop_pair,
     "thanksgiving_event": run_thanksgiving_event,
     "castle_machine": run_castle_machine,
