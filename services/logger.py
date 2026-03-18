@@ -32,6 +32,21 @@ if not logger.handlers:
 
 logger.propagate = False  # чтобы не дублировать в корневой логгер
 
+# 🌐 Корневой логгер для модулей, которые используют logging.getLogger(...)
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+if not root_logger.handlers:
+    root_handler = RotatingFileHandler(
+        LOG_FILE,
+        maxBytes=2 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
+    )
+    root_handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] [%(name)s] %(message)s")
+    )
+    root_logger.addHandler(root_handler)
+
 import time
 
 def cleanup_old_logs(days: int = 3):

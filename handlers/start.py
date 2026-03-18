@@ -526,7 +526,13 @@ async def add_account_from_mvp(message: types.Message, state: FSMContext):
         await message.answer(f"⚠️ Аккаунт <code>{uid}</code> уже есть.", parse_mode="HTML")
         return
 
-    new_acc = {"uid": uid, "username": username, "mvp_url": url}
+    new_acc = {
+        "uid": uid,
+        "username": username,
+        "mvp_url": url,
+        "mail": "",
+        "paswd": "",
+    }
     accounts.append(new_acc)
     save_accounts(user_id, accounts)
 
@@ -590,7 +596,13 @@ async def add_account_by_email_password(message: types.Message, state: FSMContex
         await state.clear()
         return
 
-    new_acc = {"uid": uid, "username": username, "mvp_url": ""}
+    new_acc = {
+        "uid": uid,
+        "username": username,
+        "mvp_url": "",
+        "mail": email or "",
+        "paswd": password,
+    }
     accounts.append(new_acc)
     save_accounts(user_id, accounts)
 
@@ -668,7 +680,13 @@ async def add_account_by_igg_code(message: types.Message, state: FSMContext):
         await state.clear()
         return
 
-    new_acc = {"uid": uid, "username": username, "mvp_url": ""}
+    new_acc = {
+        "uid": uid,
+        "username": username,
+        "mvp_url": "",
+        "mail": "",
+        "paswd": "",
+    }
     accounts.append(new_acc)
     save_accounts(user_id, accounts)
 
