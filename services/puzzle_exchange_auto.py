@@ -39,10 +39,12 @@ async def _extract_exchange_items(page: Page) -> Dict[str, Dict[str, Any]]:
         const pickId = (el) => {
             const candidates = [
                 el?.dataset?.id,
+                el?.dataset?.apid,
                 el?.dataset?.itemId,
                 el?.dataset?.goodsId,
                 el?.dataset?.exchangeId,
                 el?.getAttribute?.("data-id"),
+                el?.getAttribute?.("apid"),
                 el?.getAttribute?.("data-item-id"),
                 el?.getAttribute?.("data-goods-id"),
                 el?.getAttribute?.("data-exchange-id"),
@@ -58,9 +60,14 @@ async def _extract_exchange_items(page: Page) -> Dict[str, Dict[str, Any]]:
             const match = String(text).match(/(\\d+)/);
             return match ? parseInt(match[1], 10) : null;
         };
+        const parseNeed = (text) => {
+            const match = String(text).match(/Фрагмент(?:ов|а)?\\s*нужно\\s*:?\\s*(\\d+)/i);
+            if (match) return parseInt(match[1], 10);
+            return parseNum(text);
+        };
         const nodes = Array.from(
             document.querySelectorAll(
-                "[data-id],[data-item-id],[data-goods-id],[data-exchange-id],.exchange-item,.exchange-list li"
+                "[data-id],[data-item-id],[data-goods-id],[data-exchange-id],.exchange-item,.exchange-list li,.ex-items,.exchanges li[apid]"
             )
         );
         for (const el of nodes) {
@@ -68,14 +75,14 @@ async def _extract_exchange_items(page: Page) -> Dict[str, Dict[str, Any]]:
             if (!id) continue;
             const imgEl = el.querySelector("img");
             const titleEl = el.querySelector(".name,.title,.item-name,.exchange-name,.goods-name");
-            const needEl = el.querySelector(".need,.cost,.fragment,.exchange-cost,.need-fragment");
-            const amountEl = el.querySelector(".amount,.qty,.num,.count,.exchange-amount");
+            const needEl = el.querySelector(".need,.cost,.fragment,.exchange-cost,.need-fragment,.ex-btn-text");
+            const amountEl = el.querySelector(".amount,.qty,.num,.count,.exchange-amount,.ex-icon .num");
             const rawText = textFrom(el);
             const title = textFrom(titleEl) || (imgEl ? (imgEl.alt || "") : "") || rawText.split("\\n")[0] || "";
             const img = imgEl ? imgEl.src : "";
             const needText = textFrom(needEl) || rawText;
             const amountText = textFrom(amountEl) || rawText;
-            let need = parseNum(needText);
+            let need = parseNeed(needText);
             let amount = parseNum(amountText);
             const dataset = el.dataset || {};
             if (!need && dataset.need) need = parseNum(dataset.need);
