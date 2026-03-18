@@ -51,6 +51,8 @@ def _ensure_account_schema(account: Dict) -> bool:
     ensure_str_field("username")
     ensure_str_field("mvp_url")
     ensure_str_field("gpc_sso_token")
+    ensure_str_field("mail")
+    ensure_str_field("paswd")
 
     if "active" not in account:
         account["active"] = False
@@ -164,6 +166,8 @@ def add_account(
         "username": username,
         "mvp_url": mvp_url,
         "gpc_sso_token": token or "",
+        "mail": "",
+        "paswd": "",
         "active": len(accounts) == 0,
     }
     _ensure_account_schema(new_acc)
