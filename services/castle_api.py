@@ -1171,7 +1171,9 @@ async def complete_shop_login_igg(
 
 async def refresh_cookies_mvp(user_id: str, uid: str) -> dict[str, Any]:
     """
-    🔄 Обновляет cookies через MVP-ссылку, используя browser_patches.
+    🔄 Обновляет cookies для аккаунта:
+    - через MVP-ссылку (если она есть),
+    - иначе через email+пароль (если они сохранены).
     """
     from .accounts_manager import get_all_accounts
 
@@ -1179,14 +1181,72 @@ async def refresh_cookies_mvp(user_id: str, uid: str) -> dict[str, Any]:
 
     accounts = get_all_accounts(str(user_id))
     acc = next((a for a in accounts if a.get("uid") == uid), None)
-    if not acc or not acc.get("mvp_url"):
+    if not acc:
         return {
             "success": False,
-            "error": "MVP ссылка не найдена. Добавь аккаунт заново.",
+            "error": "Аккаунт не найден. Добавь аккаунт заново.",
             "cookies": None,
         }
 
-    mvp_url = acc["mvp_url"]
+    mvp_url = (acc.get("mvp_url") or "").strip()
+    account_email = (acc.get("mail") or "").strip()
+    account_password = (acc.get("paswd") or "").strip()
+
+    if not mvp_url and account_email and account_password:
+        logger.info(
+            "[COOKIES] ✉️ MVP ссылка отсутствует, пробую обновление через email для UID=%s",
+            uid,
+        )
+        login_result = await login_shop_email(account_email, account_password)
+        if not login_result.get("success"):
+            return {
+                "success": False,
+                "error": login_result.get("error") or "Ошибка входа по email/паролю.",
+                "cookies": login_result.get("cookies"),
+            }
+
+        cookies_result = login_result.get("cookies", {}) or {}
+        login_uid = str(login_result.get("uid") or "").strip()
+        if login_uid and login_uid != str(uid):
+            logger.warning(
+                "[COOKIES] ⚠️ UID после входа по email не совпал: expected=%s, actual=%s",
+                uid,
+                login_uid,
+            )
+            return {
+                "success": False,
+                "error": (
+                    "UID после входа по email не совпал с выбранным аккаунтом: "
+                    f"{login_uid}"
+                ),
+                "cookies": cookies_result or None,
+            }
+
+        if not cookies_result:
+            return {
+                "success": False,
+                "error": "После входа по email/паролю не удалось получить cookies.",
+                "cookies": None,
+            }
+
+        all_data = load_all_cookies()
+        all_data.setdefault(str(user_id), {})[str(uid)] = cookies_result
+        save_all_cookies(all_data)
+
+        logger.info("[COOKIES] 💾 Cookies обновлены через email для UID=%s", uid)
+        return {
+            "success": True,
+            "error": None,
+            "cookies": cookies_result,
+        }
+
+    if not mvp_url:
+        return {
+            "success": False,
+            "error": "Нет MVP ссылки и нет сохранённых email/пароля для обновления cookies.",
+            "cookies": None,
+        }
+
     cookies_result: dict[str, str] = {}
     ctx: ShopContext | None = None
     cookies_saved = False
