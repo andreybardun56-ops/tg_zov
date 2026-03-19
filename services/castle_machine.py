@@ -6,7 +6,7 @@ from services.browser_patches import run_event_with_browser
 from services.accounts_manager import get_all_accounts
 from services.castle_api import load_cookies_for_account
 
-BASE_URL = "https://event-cc.igg.com/event/castle_machine/"
+BASE_URL = "https://event-eu-cc.igg.com/event/castle_machine/"
 MAKE_URL = f"{BASE_URL}ajax.req.php?action=make&type=free"
 LOTTERY_URL = f"{BASE_URL}ajax.req.php?action=lottery"
 
@@ -142,12 +142,6 @@ async def run_castle_machine(user_id: str, uid: str = None, context=None) -> dic
             action_name = "lottery"
         else:
             return {"success": True, "message": f"⚠️ {username} ({uid}) — акция вне активных фаз."}
-
-        logger.info(f"[CASTLE_MACHINE] ▶ Отправляю запрос {action_name} для {uid}")
-
-        # === Лог сетевых запросов ===
-        page.on("request", lambda req: logger.info(f"🌍 REQUEST → {req.method} {req.url}"))
-        page.on("response", lambda res: logger.info(f"📩 RESPONSE ← {res.status} {res.url}"))
 
         logger.info(f"[CASTLE_MACHINE] ▶ Отправляю запрос {action_name} для {uid}")
 

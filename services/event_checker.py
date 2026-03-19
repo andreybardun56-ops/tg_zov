@@ -194,6 +194,98 @@ async def check_event(event_name: str, page: Page) -> bool | int:
         # <- этот внешний except был пропущен
         logger.error(f"[{event_name}] общая ошибка: {e}")
         return False
+
+
+async def _check_castle_machine_phase(page: Page) -> bool | int:
+    """
+    Для 'Создающей машины' возвращает:
+    - 1: фаза создания (Creation Segment)
+    - 2: фаза розыгрыша (Prize-Drawing Segment)
+    - False: акция неактивна/вне интервалов
+    """
+    await safe_goto(page, EVENTS["castle_machine"]["url"])
+    body_text = await _read_body_text(page)
+    if _inactive_reason(body_text):
+        return False
+
+    # 1) Быстрый признак текущей фазы по заголовку таймера
+    try:
+        chance_title = await page.query_selector(".chance .tit")
+        if chance_title:
+            title_text = ((await chance_title.inner_text()) or "").strip().lower()
+            if "draw starts in" in title_text:
+                return 1
+            if "draw ends in" in title_text:
+                return 2
+    except Exception:
+        pass
+
+    # 2) Фолбэк по двум временным интервалам на странице
+    try:
+        rows = await page.query_selector_all("div.event-time-group .event-time")
+        if len(rows) >= 2:
+            first = ((await rows[0].inner_text()) or "").strip()
+            second = ((await rows[1].inner_text()) or "").strip()
+
+            def _split_range(raw: str) -> tuple[datetime, datetime] | None:
+                m = re.match(
+                    r".*?(\d{1,2}/\d{1,2}\s+\d{2}:\d{2}:\d{2})\s*[~－～]\s*(\d{1,2}/\d{1,2}\s+\d{2}:\d{2}:\d{2}).*",
+                    raw,
+                )
+                if not m:
+                    return None
+                a, b = m.groups()
+                return parse_flexible(a), parse_flexible(b)
+
+            first_range = _split_range(first)
+            second_range = _split_range(second)
+            now_server = datetime.now(UTC) - LOCAL_OFFSET
+
+            if first_range and first_range[0] <= now_server <= first_range[1]:
+                return 1
+            if second_range and second_range[0] <= now_server <= second_range[1]:
+                return 2
+    except Exception as e:
+        logger.warning("[castle_machine] не удалось определить фазу по интервалам: %s", e)
+
+    return False
+
+
+async def check_event_active(event_name: str) -> bool | int:
+    """
+    Универсальная проверка активности события:
+    - bool для обычных событий
+    - 1/2 для castle_machine (фазы)
+    """
+    if event_name not in EVENTS:
+        logger.warning("[check_event_active] неизвестное событие: %s", event_name)
+        return False
+
+    async with async_playwright() as p:
+        ctx_data = await launch_masked_persistent_context(
+            p,
+            user_data_dir=str(PROFILE_DIR / f"{IGG_ID}_single_check"),
+            browser_path=BROWSER_PATH,
+            headless=True,
+            slow_mo=20,
+            profile=get_random_browser_profile(),
+        )
+        context: BrowserContext = ctx_data["context"]
+        page: Page = ctx_data["page"]
+        await page.route("**/*", route_handler)
+
+        try:
+            cookies_list = get_cookies_for_igg(IGG_ID)
+            await context.add_cookies(cookies_list)
+        except Exception as e:
+            logger.warning("[check_event_active] не удалось добавить cookies: %s", e)
+
+        try:
+            if event_name == "castle_machine":
+                return await _check_castle_machine_phase(page)
+            return bool(await check_event(event_name, page))
+        finally:
+            await context.close()
 # ────────────────────────────────────────────────
 # Проверка всех акций
 # ────────────────────────────────────────────────

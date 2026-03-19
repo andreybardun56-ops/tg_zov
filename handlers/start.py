@@ -29,6 +29,7 @@ from config import ADMIN_IDS
 import services.login_and_refresh as lr1
 import services.login_and_refresh_2 as lr2
 from services.lucky_wheel_auto import run_lucky_wheel
+from services.magic_wheel_auto import run_magic_wheel
 from services.puzzle_claim_auto import claim_puzzle
 from services.puzzle_claim import issue_puzzle_codes, issue_specific_puzzle
 from services.dragon_quest import run_dragon_quest
@@ -202,6 +203,7 @@ user_main_kb = ReplyKeyboardMarkup(
             KeyboardButton(text="🎁 Ввод промокода"),
             KeyboardButton(text="🧩 Пазлы")
         ],
+        [KeyboardButton(text="🎡 Магическое колесо")],
         [KeyboardButton(text="📩 Связь с разработчиком")]
     ],
     resize_keyboard=True
@@ -226,6 +228,7 @@ admin_events_menu = ReplyKeyboardMarkup(
             KeyboardButton(text="🎁 10 дней призов"),
             KeyboardButton(text="🎡 Колесо фортуны")
         ],
+        [KeyboardButton(text="🎡 Магическое колесо")],
         [
             KeyboardButton(text="🃏 Найди пару"),
             KeyboardButton(text="⚙️ Создающая машина")
@@ -579,9 +582,14 @@ async def add_account_by_email_password(message: types.Message, state: FSMContex
         await state.clear()
         return
 
-    uid = result.get("uid")
+    uid = str(result.get("uid") or "").strip()
     username = result.get("username", "Игрок")
-    cookies = result.get("cookies", {})
+    cookies = result.get("cookies", {}) or {}
+
+    if not uid:
+        await message.answer("❌ Ошибка входа: <code>Не удалось получить IGG ID.</code>", parse_mode="HTML")
+        await state.clear()
+        return
 
     all_data = load_all_users()
     for other_user, acc_list in all_data.items():
@@ -606,16 +614,24 @@ async def add_account_by_email_password(message: types.Message, state: FSMContex
     accounts.append(new_acc)
     save_accounts(user_id, accounts)
 
-    if cookies:
-        from services.cookies_io import load_all_cookies, save_all_cookies
-        all_cookies = load_all_cookies()
-        all_cookies.setdefault(user_id, {})[uid] = cookies
-        save_all_cookies(all_cookies)
+    from services.cookies_io import load_all_cookies, save_all_cookies
+    all_cookies = load_all_cookies()
+    all_cookies.setdefault(user_id, {})[uid] = cookies
+    save_all_cookies(all_cookies)
 
-    await message.answer(
-        f"✅ Аккаунт <b>{username}</b> (IGG ID: <code>{uid}</code>) добавлен!",
-        parse_mode="HTML",
-    )
+    if cookies:
+        await message.answer(
+            f"✅ Аккаунт <b>{username}</b> (IGG ID: <code>{uid}</code>) добавлен!\n"
+            f"🍪 Cookies сохранены ({len(cookies)} шт.).",
+            parse_mode="HTML",
+        )
+    else:
+        await message.answer(
+            f"✅ Аккаунт <b>{username}</b> (IGG ID: <code>{uid}</code>) добавлен!\n"
+            "⚠️ Cookies не получили при первом входе, но учётные данные сохранены "
+            "— можно обновить cookies через кнопку «🧩 Обновить cookies в базе».",
+            parse_mode="HTML",
+        )
 
     await state.clear()
 
@@ -1462,8 +1478,48 @@ async def handle_lucky_wheel(message: types.Message):
         except Exception as e:
             await message.answer(f"❌ Ошибка при запуске Колеса фортуны: <code>{e}</code>", parse_mode="HTML")
 
-    # 🚀 Запускаем в фоне, не блокируя Telegram
+# 🚀 Запускаем в фоне, не блокируя Telegram
     asyncio.create_task(background_wheel())
+
+
+#------------------------------ === Обработка кнопки 🎡 Магическое колесо ===----------------------------------
+@router.message(lambda m: m.text == "🎡 Магическое колесо")
+async def handle_magic_wheel(message: types.Message):
+    """
+    Запуск 'Магического колеса':
+    - для админа: по всем аккаунтам;
+    - для обычного пользователя: только по его аккаунтам.
+    """
+    is_admin = message.from_user.id in ADMIN_IDS
+    current_user_id = str(message.from_user.id)
+
+    if is_admin:
+        await message.answer("🎡 Запускаю Магическое колесо для всех аккаунтов... ⏳")
+    else:
+        await message.answer("🎡 Запускаю Магическое колесо для твоих аккаунтов... ⏳")
+
+    async def send_to_tg(uid: str, text: str):
+        try:
+            if uid == "system":
+                await message.answer(text)
+            else:
+                await message.answer(f"[{uid}] {text}")
+        except Exception:
+            pass
+
+    async def background_magic_wheel():
+        try:
+            if is_admin:
+                await run_magic_wheel(send_callback=send_to_tg)
+            else:
+                await run_magic_wheel(user_id=current_user_id, send_callback=send_to_tg)
+        except Exception as e:
+            await message.answer(
+                f"❌ Ошибка при запуске Магического колеса: <code>{e}</code>",
+                parse_mode="HTML",
+            )
+
+    asyncio.create_task(background_magic_wheel())
 
 # ------------------------------------ 🐉 Рыцари Драконы ------------------------------------
 from datetime import datetime  # ← правильный импорт
