@@ -13,7 +13,7 @@ from services.castle_api import refresh_cookies_mvp
 from services.castle_machine import run_castle_machine
 from services.thanksgiving_event import run_thanksgiving_event
 from services.promo_code import run_promo_code, load_promo_history, save_promo_history
-from services.accounts_manager import get_active_account
+from services.accounts_manager import get_active_account, load_all_users
 from services.event_manager import run_full_event_cycle
 
 router = Router()
@@ -37,45 +37,91 @@ async def handle_update_cookies(message: Message):
     await message.answer("♻️ Запускаю обновление cookies в фоне...")
 
     async def background_update():
-        async def progress(payload: dict):
-            idx = payload.get("processed", 0)
-            total = payload.get("total", 0) or 1
-            username = payload.get("username") or "Игрок"
-            uid = payload.get("uid") or "—"
-            status = payload.get("status")
-            error_text = payload.get("error")
+        try:
+            all_users = load_all_users()
+            queue = []
+            for user_id, accounts in all_users.items():
+                if not isinstance(accounts, list):
+                    continue
+                for acc in accounts:
+                    if not isinstance(acc, dict):
+                        continue
+                    queue.append((str(user_id), acc))
 
-            prefix = f"🔁 <b>{idx}/{total}</b> — <b>{username}</b> (<code>{uid}</code>): "
-            if status == "success":
-                await message.answer(prefix + "✅ cookies обновлены", parse_mode="HTML")
-            elif status == "skipped":
-                await message.answer(prefix + f"⚠️ пропуск ({error_text})", parse_mode="HTML")
-            elif status == "failed":
-                await message.answer(prefix + f"❌ ошибка: <i>{error_text}</i>", parse_mode="HTML")
+            summary = {
+                "success": 0,
+                "failed": 0,
+                "skipped": [],
+                "failures": [],
+                "total": len(queue),
+            }
 
-        summary = await refresh_cookies_mvp(progress_callback=progress)
+            if not queue:
+                await message.answer("⚠️ Нет аккаунтов для обновления cookies.")
+                return
 
-        summary_lines = [
-            "📊 <b>Итоги обновления cookies:</b>",
-            f"• ✅ Успешно: <b>{summary['success']}</b>",
-            f"• ❌ Ошибки: <b>{summary['failed']}</b>",
-            f"• ⚠️ Пропущено: <b>{len(summary['skipped'])}</b>",
-            f"• Всего аккаунтов: <b>{summary['total']}</b>",
-        ]
+            for idx, (user_id, acc) in enumerate(queue, start=1):
+                uid = str(acc.get("uid") or "").strip()
+                username = acc.get("username") or "Игрок"
+                prefix = f"🔁 <b>{idx}/{len(queue)}</b> — <b>{username}</b> (<code>{uid or '—'}</code>): "
 
-        if summary["failures"]:
-            summary_lines.append("\n❌ <b>Ошибки:</b>")
-            summary_lines.extend(
-                f" - {item['user_id']}:{item.get('uid', '—')} — {item['error']}" for item in summary["failures"]
+                if not uid:
+                    summary["skipped"].append(
+                        {"user_id": user_id, "uid": None, "reason": "missing_uid"}
+                    )
+                    await message.answer(prefix + "⚠️ пропуск (нет UID)", parse_mode="HTML")
+                    continue
+
+                try:
+                    result = await refresh_cookies_mvp(user_id, uid)
+                except Exception as exc:
+                    summary["failed"] += 1
+                    summary["failures"].append(
+                        {"user_id": user_id, "uid": uid, "error": str(exc)}
+                    )
+                    await message.answer(prefix + f"❌ ошибка: <i>{exc}</i>", parse_mode="HTML")
+                    continue
+
+                if result.get("success"):
+                    summary["success"] += 1
+                    await message.answer(prefix + "✅ cookies обновлены", parse_mode="HTML")
+                else:
+                    err = str(result.get("error", "unknown_error"))
+                    summary["failed"] += 1
+                    summary["failures"].append(
+                        {"user_id": user_id, "uid": uid, "error": err}
+                    )
+                    await message.answer(prefix + f"❌ ошибка: <i>{err}</i>", parse_mode="HTML")
+
+            summary_lines = [
+                "📊 <b>Итоги обновления cookies:</b>",
+                f"• ✅ Успешно: <b>{summary['success']}</b>",
+                f"• ❌ Ошибки: <b>{summary['failed']}</b>",
+                f"• ⚠️ Пропущено: <b>{len(summary['skipped'])}</b>",
+                f"• Всего аккаунтов: <b>{summary['total']}</b>",
+            ]
+
+            if summary["failures"]:
+                summary_lines.append("\n❌ <b>Ошибки:</b>")
+                summary_lines.extend(
+                    f" - {item['user_id']}:{item.get('uid', '—')} — {item['error']}"
+                    for item in summary["failures"]
+                )
+
+            if summary["skipped"]:
+                summary_lines.append("\n⚠️ <b>Пропущенные аккаунты:</b>")
+                summary_lines.extend(
+                    f" - {item['user_id']}:{item.get('uid', '—')} — {item['reason']}"
+                    for item in summary["skipped"]
+                )
+
+            await message.answer("\n".join(summary_lines), parse_mode="HTML")
+        except Exception as exc:
+            logger.exception("Ошибка фонового обновления cookies: %s", exc)
+            await message.answer(
+                f"❌ Фоновое обновление cookies завершилось с ошибкой: <code>{exc}</code>",
+                parse_mode="HTML",
             )
-
-        if summary["skipped"]:
-            summary_lines.append("\n⚠️ <b>Пропущенные аккаунты:</b>")
-            summary_lines.extend(
-                f" - {item['user_id']}:{item.get('uid', '—')} — {item['reason']}" for item in summary["skipped"]
-            )
-
-        await message.answer("\n".join(summary_lines), parse_mode="HTML")
 
     # 🔥 Запуск в фоне — бот не блокируется
     asyncio.create_task(background_update())

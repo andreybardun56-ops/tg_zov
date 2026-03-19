@@ -37,6 +37,7 @@ REQUIRED_COOKIES = {
 # 🧱 Работа с cookies.json
 # ───────────────────────────────────────────────
 SLOW_MO = 50
+EMAIL_LOGIN_SLOW_MO = 0
 
 
 class ShopContext(TypedDict):
@@ -683,7 +684,7 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                 user_data_dir="data/chrome_profiles/_shop_email",
                 browser_path=BROWSER_PATH,
                 headless=True,
-                slow_mo=SLOW_MO,
+                slow_mo=EMAIL_LOGIN_SLOW_MO,
                 profile=profile,
                 apply_patches=False,
                 set_extra_headers=False,
@@ -708,8 +709,6 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                     await page.locator("text=Принять все").click(timeout=1500)
             except Exception:
                 pass
-            await humanize_pre_action(page)
-
             logger.info("[SHOP] ✉️ Вводим email")
             filled_email = False
             for selector in [
@@ -807,7 +806,7 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
             cookies_result = {}
             token = None
 
-            while time.time() - start_time < 15.0:
+            while time.time() - start_time < 8.0:
                 cookies_list = await context.cookies()
                 cookies_result = {c["name"]: c["value"] for c in cookies_list}
 
@@ -820,6 +819,9 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                 )
 
                 if not missing:
+                    token = cookies_result.get("gpc_sso_token")
+                    break
+                if cookies_result.get("gpc_sso_token") and cookies_result.get("PHPSESSID"):
                     token = cookies_result.get("gpc_sso_token")
                     break
 
@@ -846,7 +848,6 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
 
             logger.info("[SHOP] 🌍 Открываем страницу магазина после логина")
             await open_shop_page_with_retry(page, "https://castleclash.igg.com/shop/")
-            await _clear_page_storage(page)
             await _accept_cookies(page)
             if await _is_access_denied(page):
                 await _capture_login_error_screenshot(page, "access_denied")
@@ -857,17 +858,15 @@ async def login_shop_email(email: str, password: str) -> dict[str, Any]:
                     "cookies": cookies_result,
                     "username": None,
                 }
-            await humanize_pre_action(page)
+            await _wait_for_username(page, timeout_ms=4000)
+            parsed_uid, parsed_username = await _extract_userbar_info(page)
 
             try:
-                await wait_shop_ready(page)
-            except PlaywrightTimeout as exc:
-                logger.error("[SHOP] ❌ Таймаут полной загрузки магазина: %s", exc)
+                latest_cookies = await context.cookies()
+                if latest_cookies:
+                    cookies_result = {c["name"]: c["value"] for c in latest_cookies}
             except Exception as exc:
-                logger.error("[SHOP] ❌ Ошибка ожидания полной готовности магазина: %s", exc)
-
-            await _wait_for_username(page, timeout_ms=12000)
-            parsed_uid, parsed_username = await _extract_userbar_info(page)
+                logger.debug("[SHOP] Не удалось перечитать cookies после входа: %s", exc)
 
             if parsed_uid and not uid:
                 uid = parsed_uid
