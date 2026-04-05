@@ -225,18 +225,18 @@ admin_events_menu = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="━━━━━━━━━━━ 🎁 Основные 🎯 ━━━━━━━━━━━")],
         [
-            KeyboardButton(text="🎁 10 дней призов"),
+            #KeyboardButton(text="🎁 10 дней призов"),
+            KeyboardButton(text="🎡 Магическое колесо"),
             KeyboardButton(text="🎡 Колесо фортуны")
         ],
-        [KeyboardButton(text="🎡 Магическое колесо")],
         [
             KeyboardButton(text="🃏 Найди пару"),
+            KeyboardButton(text="🐉 Рыцари Драконы"),
             KeyboardButton(text="⚙️ Создающая машина")
         ],
-        [
-            KeyboardButton(text="🐉 Рыцари Драконы"),
-            KeyboardButton(text="🧩 Маленькая помощь")
-        ],
+        #[
+        #    KeyboardButton(text="🧩 Маленькая помощь")
+        #],
         [KeyboardButton(text="━━━━━━━━━━━ 🧩 Пазлы ━━━━━━━━━━━")],
         [KeyboardButton(text="🧩 Пазлы (подменю)")],
         [KeyboardButton(text="🔙 Главное меню")]
@@ -264,10 +264,10 @@ def get_admin_puzzles_menu() -> ReplyKeyboardMarkup:
         [KeyboardButton(text="━━━━━━━━━━━ 🧩 Пазлы ━━━━━━━━━━━")],
         [
             KeyboardButton(text="🧩 Получить пазлы"),
-            KeyboardButton(text="🧩 Взять пазл"),
+            KeyboardButton(text="🧩 Взять код"),
+            KeyboardButton(text="🧩 Собрать пазл"),
         ],
         [
-            KeyboardButton(text="🧩 Собрать пазл"),
             KeyboardButton(
                 text="⛔️ Остановить фарм дублей"
                 if is_duplicates_running()
