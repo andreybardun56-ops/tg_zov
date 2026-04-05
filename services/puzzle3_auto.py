@@ -322,7 +322,7 @@ def calculate_puzzle_totals(file_path: Path, accounts_processed: int = None):
     else:
         logger.info(f"🔢 Аккаунтов с дубликатами: {count_accounts}")
 
-    summary_path = Path("data/puzzle_duplicates_summary.json")
+    summary_path = Path("data/puzzle_summary.json")
     with open(summary_path, "w", encoding="utf-8") as out:
         json.dump({
             "totals": totals,

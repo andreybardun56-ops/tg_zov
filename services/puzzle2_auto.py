@@ -12,7 +12,6 @@ import warnings
 
 from services.browser_patches import BROWSER_PATH
 
-
 # === Настройка тишины для asyncio и Playwright ===
 def silence_asyncio_exceptions(loop, context):
     msg = context.get("message")
@@ -82,7 +81,7 @@ DATA_FILE = Path("data/puzzle_data.jsonl")
 FAIL_DIR = Path("data/failures")
 FARM_STATE_FILE = Path("data/farm_state.json")
 # === Настройки ===
-CONCURRENT = 4  # количество аккаов
+CONCURRENT = 5  # количество аккаов
 REQUEST_TIMEOUT = 30000  # время ожидания загрузки
 COOKIE_CAPTURE_WAIT = 3  # Ждёт пока установятся куки
 DELAY_BETWEEN_ACCOUNTS = 3  # Пауза (в секундах) между стартом обработки одного аккаунта и переходом к следующему.
