@@ -10,3 +10,4 @@ USER_ACCOUNTS_FILE = f"{DATA_DIR}/user_accounts.json"
 COOKIES_FILE = f"{DATA_DIR}/cookies.json"
 HEADLESS_MODE = False  # поменяй на True, если не хочешь видеть браузер
 ADMIN_IDS = [1662209988]  # 🔹 твой Telegram ID
+TESTER_IDS = []  # 🔸 Telegram ID тестировщиков (без прав админа)

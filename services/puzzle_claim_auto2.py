@@ -10,6 +10,13 @@ from playwright.async_api import async_playwright
 from html import escape
 
 from services.logger import logger
+from services.event_checker import get_event_status
+from services.puzzle_files import (
+    PUZZLE_CLAIM_LOG_FILE,
+    PUZZLE_DATA_FILE,
+    PUZZLE_SUMMARY_FILE,
+    clear_puzzle_runtime_files,
+)
 from services.browser_patches import (
     BROWSER_PATH,
     get_random_browser_profile,
@@ -20,9 +27,7 @@ from services.browser_patches import (
 
 # ================== PATHS ==================
 COOKIES_FILE = Path("data/cookies.json")
-PUZZLE_DATA_FILE = Path("data/puzzle_data.jsonl")
-PUZZLE_SUMMARY_FILE = Path("data/puzzle_summary.json")
-PUZZLE_CLAIM_LOG = Path("data/puzzle_claim_log.json")
+PUZZLE_CLAIM_LOG = PUZZLE_CLAIM_LOG_FILE
 PROFILE_DIR = Path("data/chrome_profiles")
 PROFILE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -84,6 +89,11 @@ async def auto_claim_puzzle2(user_id: str, bot, target_iggid: Optional[str] = No
     target_iggid можно указать, чтобы выбрать конкретный аккаунт.
     """
     try:
+        if not await get_event_status("puzzle2"):
+            clear_puzzle_runtime_files(reason="auto_claim_inactive")
+            logger.info("[auto_claim_puzzle] ⏸ Puzzle2 не активна, данные очищены.")
+            return False
+
         tg_user_id = str(user_id)
         claim_log = load_json(PUZZLE_CLAIM_LOG, {})
         user_entry = claim_log.setdefault("users", {}).setdefault(tg_user_id, {})
