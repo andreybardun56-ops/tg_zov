@@ -44,6 +44,48 @@ def _is_event_inactive_text(text: str) -> bool:
     return any(marker in lowered for marker in EVENT_INACTIVE_MARKERS)
 
 
+def _response_indicates_failure(body: str) -> bool:
+    """
+    Пытается определить, что сервер явно вернул ошибку открытия карты.
+    Важно: для этого события `code/ret = 0` может быть успешным ответом,
+    поэтому не считаем это ошибкой автоматически.
+    """
+    if not body:
+        return False
+
+    try:
+        data = json.loads(body)
+    except Exception:
+        data = None
+
+    if isinstance(data, dict):
+        # Частые поля явной ошибки в JSON-ответах
+        for key in ("error", "errno", "err_code"):
+            value = data.get(key)
+            if isinstance(value, bool):
+                if value:
+                    return True
+            elif isinstance(value, (int, float)):
+                if value > 0:
+                    return True
+            elif isinstance(value, str) and value.strip() not in ("", "0", "ok", "success"):
+                return True
+
+        success = data.get("success")
+        if success in (False, 0, "0", "false", "False"):
+            return True
+
+        msg = str(data.get("msg", "")).lower()
+        if msg and any(marker in msg for marker in ("error", "ошиб", "invalid", "forbid", "denied", "fail")):
+            return True
+
+        return False
+
+    lowered = body.lower()
+    fail_markers = ("ошибка", "error", "failed", "forbidden", "denied", "invalid")
+    return any(marker in lowered for marker in fail_markers)
+
+
 def _build_pairs_preview(cards_data: list[dict], pairs: list[dict], hash_map: dict[str, list[dict]]) -> str:
     """
     Формирует мини-превью поля 5/5/4 и легенду, чтобы было видно где лежат пары.
@@ -348,7 +390,7 @@ async def run_flop_pair(user_id: str, uid: str = None, context=None):
 
                 await asyncio.sleep(2)
                 attempts -= 1
-                if body and any(x in body.lower() for x in ("error", "\"ret\":0", "\"code\":0")):
+                if _response_indicates_failure(body):
                     pair_opened = False
 
             if pair_opened:
