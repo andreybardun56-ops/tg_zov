@@ -360,9 +360,9 @@ async def run_flop_pair(user_id: str, uid: str = None, context=None):
             await asyncio.sleep(2)
 
         # сохраняем обновлённые открытые
-        account_data = stored.setdefault("accounts", {}).setdefault(_account_key(user_id, uid), {})
-        account_data["pairs"] = pairs
-        account_data["opened_pairs"] = [list(x) for x in sorted(opened_pairs)]
+        stored_account_data = stored.setdefault("accounts", {}).setdefault(_account_key(user_id, uid), {})
+        stored_account_data["pairs"] = pairs
+        stored_account_data["opened_pairs"] = [list(x) for x in sorted(opened_pairs)]
         with open(PAIRS_FILE, "w", encoding="utf-8") as f:
             json.dump(stored, f, indent=2, ensure_ascii=False)
 
