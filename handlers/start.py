@@ -8,7 +8,7 @@ from services.logger import logger
 from aiogram import Router, types, F
 from aiogram.filters import Command
 from aiogram.types import (
-    ReplyKeyboardMarkup, KeyboardButton,
+    ReplyKeyboardMarkup,
     CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 )
 from aiogram.fsm.state import State, StatesGroup
@@ -25,7 +25,7 @@ from services.puzzle_exchange_auto import (
     get_exchange_items,
 )
 
-from config import ADMIN_IDS
+from config import ADMIN_IDS, TESTER_IDS
 import services.login_and_refresh as lr1
 import services.login_and_refresh_2 as lr2
 from services.lucky_wheel_auto import run_lucky_wheel
@@ -64,6 +64,17 @@ from keyboards.inline import (
     get_collect_puzzle_kb,
 )
 from keyboards.inline import send_exchange_items
+from keyboards.reply import (
+    get_user_main_kb,
+    get_tester_main_kb,
+    get_admin_main_kb,
+    get_admin_events_menu,
+    get_admin_system_menu,
+    get_accounts_kb,
+    get_puzzle_submenu_kb,
+    get_admin_manage_menu as build_admin_manage_menu,
+    get_admin_puzzles_menu as build_admin_puzzles_menu,
+)
 from services.event_checker import check_all_events
 from services.accounts_manager import get_all_accounts
 router = Router()
@@ -100,23 +111,26 @@ def _load_puzzle_claim_log() -> dict:
 
 def _build_stats_page(page: int, page_size: int = 7) -> tuple[str, InlineKeyboardMarkup | None]:
     users = load_all_users()
-    users_with_accounts = {user_id: accs for user_id, accs in users.items() if accs}
 
     def _sort_key(val: str):
         return int(val) if str(val).isdigit() else str(val)
 
-    user_ids = sorted(users_with_accounts.keys(), key=_sort_key)
+    log_data = _load_puzzle_claim_log()
+    log_users = log_data.get("users", {}) if isinstance(log_data, dict) else {}
+    users_meta = log_data.get("users_meta", {}) if isinstance(log_data, dict) else {}
+
+    # Показываем всех: и тех, у кого есть аккаунты, и тех, кто только получал пазлы.
+    user_ids = sorted(
+        {str(uid) for uid in users.keys()} | {str(uid) for uid in log_users.keys()} | {str(uid) for uid in users_meta.keys()},
+        key=_sort_key,
+    )
     total_users = len(user_ids)
-    total_accounts = sum(len(accs) for accs in users_with_accounts.values())
+    total_accounts = sum(len(accs) for accs in users.values() if isinstance(accs, list))
 
     total_pages = max(1, (total_users + page_size - 1) // page_size)
     page = max(0, min(page, total_pages - 1))
     start = page * page_size
     end = start + page_size
-
-    log_data = _load_puzzle_claim_log()
-    log_users = log_data.get("users", {}) if isinstance(log_data, dict) else {}
-    users_meta = log_data.get("users_meta", {}) if isinstance(log_data, dict) else {}
 
     lines = [
         "📊 <b>Статистика аккаунтов</b>",
@@ -130,16 +144,36 @@ def _build_stats_page(page: int, page_size: int = 7) -> tuple[str, InlineKeyboar
         lines.append("— нет данных")
     else:
         for user_id in user_ids[start:end]:
-            accs = users_with_accounts[user_id]
+            accs = users.get(user_id, []) or []
             user_log = log_users.get(str(user_id), {})
-            total_puzzles = sum(
-                entry.get("count", 0)
-                for entry in user_log.values()
-                if isinstance(entry, dict)
-            )
+            total_puzzles = 0
+            if isinstance(user_log, dict):
+                # Формат auto_claim: users.{tg_user_id}.{iggid}.count
+                nested_counts = [
+                    entry.get("count", 0)
+                    for entry in user_log.values()
+                    if isinstance(entry, dict)
+                ]
+                # Формат ручной выдачи: {"count": ..., "claimed_puzzles": ...}
+                direct_count = user_log.get("count", 0)
+                if nested_counts:
+                    parsed = []
+                    for x in nested_counts:
+                        try:
+                            parsed.append(int(x))
+                        except (TypeError, ValueError):
+                            continue
+                    total_puzzles = sum(parsed)
+                try:
+                    total_puzzles = max(total_puzzles, int(direct_count))
+                except (TypeError, ValueError):
+                    pass
+
             meta = users_meta.get(str(user_id), {})
-            display_name = meta.get("name") or ""
-            display_tag = meta.get("tag") or ""
+            log_name = user_log.get("tg_name", "") if isinstance(user_log, dict) else ""
+            log_tag = user_log.get("tg_tag", "") if isinstance(user_log, dict) else ""
+            display_name = meta.get("name") or meta.get("username") or log_name
+            display_tag = meta.get("tag") or meta.get("username") or log_tag
             display_bits = " ".join(bit for bit in [display_name, f"@{display_tag}" if display_tag else ""] if bit)
             label = f"{user_id}"
             if display_bits:
@@ -195,156 +229,52 @@ class AddAccountState(StatesGroup):
 
 def is_cookie_refresh_running() -> bool:
     return any(task for task in COOKIE_REFRESH_TASKS if not task.done())
-# ----------------------------- 👥 Главное меню -----------------------------
-user_main_kb = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="👤 Управление аккаунтами")],
-        [
-            KeyboardButton(text="🎁 Ввод промокода"),
-            KeyboardButton(text="🧩 Пазлы")
-        ],
-        [KeyboardButton(text="🎡 Магическое колесо")],
-        [KeyboardButton(text="📩 Связь с разработчиком")]
-    ],
-    resize_keyboard=True
-)
 
-# ----------------------------- 🛡️ Админские меню -----------------------------
-admin_main_menu = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="🎯 События")],
-        [KeyboardButton(text="⚙️ Управление")],
-        [KeyboardButton(text="🔧 Система")]
-    ],
-    resize_keyboard=True,
-    input_field_placeholder="Выбери раздел 👑"
-)
 
-# 🎯 События
-admin_events_menu = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="━━━━━━━━━━━ 🎁 Основные 🎯 ━━━━━━━━━━━")],
-        [
-            #KeyboardButton(text="🎁 10 дней призов"),
-            KeyboardButton(text="🎡 Магическое колесо"),
-            KeyboardButton(text="🎡 Колесо фортуны")
-        ],
-        [
-            KeyboardButton(text="🃏 Найди пару"),
-            KeyboardButton(text="🐉 Рыцари Драконы"),
-            KeyboardButton(text="⚙️ Создающая машина")
-        ],
-        #[
-        #    KeyboardButton(text="🧩 Маленькая помощь")
-        #],
-        [KeyboardButton(text="━━━━━━━━━━━ 🧩 Пазлы ━━━━━━━━━━━")],
-        [KeyboardButton(text="🧩 Пазлы (подменю)")],
-        [KeyboardButton(text="🔙 Главное меню")]
-    ],
-    resize_keyboard=True
-)
+def _is_admin(user_id: int) -> bool:
+    return user_id in ADMIN_IDS
+
+
+def _is_tester(user_id: int) -> bool:
+    return user_id in TESTER_IDS
+
+
+def _is_staff(user_id: int) -> bool:
+    return _is_admin(user_id) or _is_tester(user_id)
+
+
+def _main_menu_for_user(user_id: int) -> ReplyKeyboardMarkup:
+    if _is_admin(user_id):
+        return admin_main_menu
+    if _is_tester(user_id):
+        return tester_main_menu
+    return user_main_kb
+
+
+# ----------------------------- 👥 Клавиатуры (вынесены в keyboards/reply.py) -----------------------------
+user_main_kb = get_user_main_kb()
+tester_main_menu = get_tester_main_kb()
+admin_main_menu = get_admin_main_kb()
+admin_events_menu = get_admin_events_menu()
+admin_system_menu = get_admin_system_menu()
+accounts_kb = get_accounts_kb()
 
 # 🧩 Подменю пазлов
 def get_admin_puzzles_menu() -> ReplyKeyboardMarkup:
-    farm_controls = []
-    if is_farm_running():
-        farm_controls.extend([
-            KeyboardButton(text="⛔️ Остановить фарм"),
-            KeyboardButton(text="⏸ Пауза фарма"),
-        ])
-    elif has_saved_state():
-        farm_controls.extend([
-            KeyboardButton(text="▶️ Продолжить фарм"),
-            KeyboardButton(text="⛔️ Остановить фарм"),
-        ])
-    else:
-        farm_controls.append(KeyboardButton(text="🧩 Фарм пазлов"))
-
-    keyboard = [
-        [KeyboardButton(text="━━━━━━━━━━━ 🧩 Пазлы ━━━━━━━━━━━")],
-        [
-            KeyboardButton(text="🧩 Получить пазлы"),
-            KeyboardButton(text="🧩 Взять код"),
-            KeyboardButton(text="🧩 Собрать пазл"),
-        ],
-        [
-            KeyboardButton(
-                text="⛔️ Остановить фарм дублей"
-                if is_duplicates_running()
-                else "🧩 Фарм дублей"
-            ),
-        ],
-    ]
-
-    if farm_controls:
-        keyboard.append(farm_controls)
-
-    keyboard.append([KeyboardButton(text="🔙 Назад к событиям")])
-
-    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+    return build_admin_puzzles_menu(
+        farm_running=is_farm_running(),
+        has_saved_state=has_saved_state(),
+        duplicates_running=is_duplicates_running(),
+    )
 
 # ⚙️ Управление
 def get_admin_manage_menu() -> ReplyKeyboardMarkup:
-    cookie_button_text = (
-        "⛔️ Остановить обновление cookies"
-        if is_cookie_refresh_running()
-        else "🧩 Обновить cookies в базе"
-    )
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="━━━━━━━━━━━ ⚙️ Управление ━━━━━━━━━━━")],
-            [
-                KeyboardButton(text="👤 Управление аккаунтами"),
-                KeyboardButton(text="🔍 Проверить пары")
-            ],
-            [
-                KeyboardButton(text="📊 Проверить акции"),
-                KeyboardButton(text="🔁 Автосбор наград")
-            ],
-            [
-                KeyboardButton(text="🔄 Обновить cookies"),
-                KeyboardButton(text=cookie_button_text)
-            ],
-            [KeyboardButton(text="🎁 Ввод промокода")],
-            [KeyboardButton(text="🔙 Главное меню")]
-        ],
-        resize_keyboard=True
-    )
-
-# 🔧 Система
-admin_system_menu = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="━━━━━━━━━━━ 🔧 Система ━━━━━━━━━━━")],
-        [
-            KeyboardButton(text="🧪 Тест"),
-            KeyboardButton(text="📊 Статистика")
-        ],
-        [KeyboardButton(text="🧹 Очистить мусор")],
-        [KeyboardButton(text="♻️ Перезапустить бота")],
-        [KeyboardButton(text="🔙 Главное меню")]
-    ],
-    resize_keyboard=True
-)
-
-
-accounts_kb = ReplyKeyboardMarkup(
-    keyboard=[
-        [
-            KeyboardButton(text="➕ Добавить аккаунт"),
-            KeyboardButton(text="🗑 Удалить аккаунт")
-        ],
-        [
-            KeyboardButton(text="📜 Список аккаунтов"),
-            KeyboardButton(text="🔙 Назад")
-        ]
-    ],
-    resize_keyboard=True
-)
+    return build_admin_manage_menu(cookie_refresh_running=is_cookie_refresh_running())
 
 @router.message(F.text == "🔙 Главное меню")
 async def back_to_main_admin(message: types.Message):
-    if message.from_user.id in ADMIN_IDS:
-        await message.answer("🏠 Главное админ-меню:", reply_markup=admin_main_menu)
+    if _is_staff(message.from_user.id):
+        await message.answer("🏠 Главное меню:", reply_markup=_main_menu_for_user(message.from_user.id))
     else:
         await message.answer("🚫 У тебя нет доступа.")
 
@@ -377,22 +307,37 @@ async def paginate_stats(callback: CallbackQuery):
 
 @router.message(F.text == "🎯 События")
 async def open_events_menu(message: types.Message):
+    if not _is_staff(message.from_user.id):
+        await message.answer("🚫 Эта команда доступна только админам и тестировщикам.")
+        return
     await message.answer("🎯 Меню событий:", reply_markup=admin_events_menu)
 
 @router.message(F.text == "🧩 Пазлы (подменю)")
 async def open_puzzles_submenu(message: types.Message):
+    if not _is_staff(message.from_user.id):
+        await message.answer("🚫 Эта команда доступна только админам и тестировщикам.")
+        return
     await message.answer("🧩 Меню пазлов и мини-игр:", reply_markup=get_admin_puzzles_menu())
 
 @router.message(F.text == "🔙 Назад к событиям")
 async def back_to_events(message: types.Message):
+    if not _is_staff(message.from_user.id):
+        await message.answer("🚫 Эта команда доступна только админам и тестировщикам.")
+        return
     await message.answer("🎯 Меню событий:", reply_markup=admin_events_menu)
 
 @router.message(F.text == "⚙️ Управление")
 async def open_manage_menu(message: types.Message):
+    if not _is_staff(message.from_user.id):
+        await message.answer("🚫 Эта команда доступна только админам и тестировщикам.")
+        return
     await message.answer("⚙️ Меню управления:", reply_markup=get_admin_manage_menu())
 
 @router.message(F.text == "🔧 Система")
 async def open_system_menu(message: types.Message):
+    if not _is_admin(message.from_user.id):
+        await message.answer("🚫 Эта команда доступна только администраторам.")
+        return
     await message.answer("🔧 Системное меню:", reply_markup=admin_system_menu)
 
 
@@ -448,8 +393,7 @@ async def handle_collect_specific_puzzle(callback: CallbackQuery):
 async def start_cmd(message: types.Message):
     """Приветственное сообщение и выбор панели"""
     user_id = message.from_user.id
-    is_admin = user_id in ADMIN_IDS
-    kb = admin_main_menu if is_admin else user_main_kb
+    kb = _main_menu_for_user(user_id)
 
     text = (
         "👋 Привет! Я твой помощник по акциям Castle Clash.\n\n"
@@ -765,7 +709,7 @@ async def list_accounts(message: types.Message):
 # 🔙 Назад
 @router.message(F.text == "🔙 Назад")
 async def go_back(message: types.Message):
-    kb = admin_main_menu if message.from_user.id in ADMIN_IDS else user_main_kb
+    kb = _main_menu_for_user(message.from_user.id)
     await message.answer("🔙 Главное меню:", reply_markup=kb)
 
 
@@ -1116,29 +1060,16 @@ async def stop_farm_duplicates(message: types.Message):
             reply_markup=get_admin_puzzles_menu()
         )
 
-# --- Подменю "Пазлы" (reply-кнопки) ---
-puzzle_submenu = ReplyKeyboardMarkup(
-    keyboard=[
-        [
-            KeyboardButton(text="🧩 Получить пазлы"),
-            KeyboardButton(text="🧩 Взять пазл")
-        ],
-        [
-            KeyboardButton(text="🧩 Собрать пазл"),
-            KeyboardButton(text="♻️ Обменять пазлы")
-        ],
-        [KeyboardButton(text="🧩 Фарм дублей")],
-        [KeyboardButton(text="🔙 Назад")]
-    ],
-    resize_keyboard=True
-)
+puzzle_submenu = get_puzzle_submenu_kb()
 
 # ------------------------------------ 🧩 Пазлы ------------------------------------
 @router.message(F.text == "🧩 Пазлы")
 async def puzzles_menu(message: types.Message):
     from services.event_checker import get_event_status
+    from services.puzzle_files import clear_puzzle_runtime_files
     is_active = await get_event_status("puzzle2")
     if not is_active:
+        clear_puzzle_runtime_files(reason="puzzle2_menu_inactive")
         await message.answer("⚠️ Акция «🧩 Пазлы» сейчас не активна.")
         return
     """Показывает меню выбора между получением и обменом пазлов."""

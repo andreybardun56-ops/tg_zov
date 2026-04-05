@@ -1,7 +1,6 @@
 # tg_zov/services/farm_puzzles_duplicates_auto.py
 import asyncio
 import json
-import os
 from contextlib import suppress
 from datetime import datetime, timedelta
 from importlib.machinery import SourceFileLoader
@@ -19,9 +18,14 @@ from services.event_checker import (
     get_event_status,
 )
 from services.logger import logger
+from services.puzzle_files import (
+    PUZZLE_DATA_FILE,
+    PUZZLE_SUMMARY_FILE,
+    clear_puzzle_runtime_files,
+)
 
-DUPES_SUMMARY = "data/puzzle_summary.json"
-DUPES_DATA = "data/puzzle_data.jsonl"
+DUPES_SUMMARY = str(PUZZLE_SUMMARY_FILE)
+DUPES_DATA = str(PUZZLE_DATA_FILE)
 
 IS_FARM_RUNNING = False
 FARM_TASK: Optional[asyncio.Task] = None
@@ -79,13 +83,14 @@ async def ensure_puzzle_event_active(bot: Optional[Bot]) -> bool:
 
     if not is_active:
         logger.info("[FARM-DUPES] ⏸ Акция Puzzle2 не активна — фарм дублей не запускаем.")
+        clear_puzzle_runtime_files(reason="puzzle2_inactive")
 
     return is_active
 
 
 async def read_dupes_summary() -> dict:
     """Читает файл со статистикой дублей."""
-    if not os.path.exists(DUPES_SUMMARY):
+    if not Path(DUPES_SUMMARY).exists():
         return {}
     try:
         with open(DUPES_SUMMARY, "r", encoding="utf-8") as f:
@@ -167,14 +172,7 @@ async def run_farm_duplicates(bot: Optional[Bot] = None) -> Dict[str, Any]:
             "error": None,
         }
 
-    for path in (DUPES_SUMMARY, DUPES_DATA):
-        try:
-            if os.path.exists(path):
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write("{}" if path.endswith(".json") else "")
-                logger.info(f"[FARM-DUPES] 🧹 Файл {path} очищен перед запуском")
-        except Exception as e:
-            logger.warning(f"[FARM-DUPES] ⚠️ Не удалось очистить {path}: {e}")
+    clear_puzzle_runtime_files(reason="new_duplicates_farm_start")
 
     IS_FARM_RUNNING = True
     start_time = datetime.now()

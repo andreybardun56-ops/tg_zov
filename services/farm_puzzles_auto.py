@@ -1,7 +1,5 @@
 # tg_zov/services/farm_puzzles_auto.py
 import asyncio
-import json
-import os
 from contextlib import suppress
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -17,8 +15,10 @@ from services.event_checker import (
     check_all_events,
     get_event_status,
 )
+from services.puzzle_files import (
+    clear_puzzle_runtime_files,
+)
 
-PUZZLE_SUMMARY = "data/puzzle_summary.json"
 IS_FARM_RUNNING = False  # 🔒 глобальный флаг, чтобы не запускать фарм повторно
 FARM_TASK: Optional[asyncio.Task] = None  # 🔗 ссылка на текущий таск фарма
 
@@ -62,6 +62,7 @@ async def ensure_puzzle_event_active(bot: Optional[Bot]) -> bool:
 
     if not is_active:
         logger.info("[FARM] ⏸ Акция Puzzle2 не активна — фарм не запускаем.")
+        clear_puzzle_runtime_files(reason="puzzle2_inactive")
 
     return is_active
 
@@ -158,28 +159,7 @@ async def run_farm_puzzles_for_all(
         }
 
     if not resume:
-        # 🧹 Очистка старых данных перед новым запуском
-        FILES_TO_CLEAR = [
-            "data/puzzle_summary.json",
-            "data/puzzle_data.jsonl",
-        ]
-
-        for path in FILES_TO_CLEAR:
-            try:
-                if os.path.exists(path):
-                    with open(path, "w", encoding="utf-8") as f:
-                        f.write("{}" if path.endswith(".json") else "")
-                    logger.info(f"[FARM] 🧹 Файл {path} очищен перед запуском")
-            except Exception as e:
-                logger.warning(f"[FARM] ⚠️ Не удалось очистить {path}: {e}")
-        # 🧹 Очистка старого файла статистики перед новым запуском
-        try:
-            if os.path.exists(PUZZLE_SUMMARY):
-                with open(PUZZLE_SUMMARY, "w", encoding="utf-8") as f:
-                    json.dump({}, f)
-                logger.info(f"[FARM] 🧹 Старый {PUZZLE_SUMMARY} очищен перед запуском")
-        except Exception as e:
-            logger.warning(f"[FARM] ⚠️ Не удалось очистить {PUZZLE_SUMMARY}: {e}")
+        clear_puzzle_runtime_files(reason="new_farm_start")
     if IS_FARM_RUNNING:
         note = "⚙️ Фарм уже выполняется, подожди окончания ⏳"
         if bot:

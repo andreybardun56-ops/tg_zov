@@ -4,7 +4,7 @@
 
 Используется кнопкой "🎁 Получить 30 пазлов" в start.py.
 Берёт 30 первых кодов из puzzle_data.jsonl, удаляет их из файла и
-пишет запись в puzzle_claim.log.
+пишет запись в puzzle_claim_log.json.
 """
 
 import os
@@ -13,12 +13,11 @@ import logging
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+from services.puzzle_files import PUZZLE_CLAIM_LOG_FILE, PUZZLE_DATA_FILE
 
 logger = logging.getLogger("puzzle_claim")
 
-# Пути к файлам
-PUZZLE_DATA_FILE = Path("data/puzzle_data.jsonl")
-PUZZLE_CLAIM_LOG = Path("data/puzzle_claim.log")
+PUZZLE_CLAIM_LOG = PUZZLE_CLAIM_LOG_FILE
 
 
 # ─────────────────────────── helpers ───────────────────────────
@@ -61,16 +60,51 @@ def _write_jsonl(path: Path, blocks: List[Dict[str, Any]]):
     os.replace(tmp, path)
 
 
-def _append_log(user_id: int, count: int, user_name: str | None = None, user_tag: str | None = None):
-    """Добавляет запись о выдаче кодов в puzzle_claim.log"""
-    safe_name = user_name.replace(" ", "_") if user_name else ""
-    safe_tag = user_tag.lstrip("@") if user_tag else ""
+def _load_claim_log() -> Dict[str, Any]:
+    if not PUZZLE_CLAIM_LOG.exists():
+        return {}
+    try:
+        with open(PUZZLE_CLAIM_LOG, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_claim_log(data: Dict[str, Any]) -> None:
     PUZZLE_CLAIM_LOG.parent.mkdir(parents=True, exist_ok=True)
-    with open(PUZZLE_CLAIM_LOG, "a", encoding="utf-8") as f:
-        f.write(
-            f"[{datetime.now():%Y-%m-%d %H:%M:%S}] user_id={user_id} "
-            f"tg_name={safe_name} tg_tag={safe_tag} получил {count} кодов\n"
-        )
+    with open(PUZZLE_CLAIM_LOG, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _append_log(user_id: int, count: int, user_name: str | None = None, user_tag: str | None = None):
+    """Добавляет запись о выдаче кодов в puzzle_claim_log.json"""
+    log_data = _load_claim_log()
+    key = str(user_id)
+    user_entry = log_data.setdefault(
+        key,
+        {
+            "count": 0,
+            "claimed_puzzles": [],
+            "claimed_ec_params": [],
+            "history": [],
+            "tg_name": "",
+            "tg_tag": "",
+        },
+    )
+
+    if user_name:
+        user_entry["tg_name"] = user_name
+    if user_tag:
+        user_entry["tg_tag"] = user_tag.lstrip("@")
+    user_entry["count"] = int(user_entry.get("count", 0)) + int(count)
+    user_entry.setdefault("history", []).append(
+        {
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "action": "claim_30_codes",
+            "count": count,
+        }
+    )
+    _save_claim_log(log_data)
 
 
 def _append_specific_log(
@@ -80,47 +114,50 @@ def _append_specific_log(
     user_name: str | None = None,
     user_tag: str | None = None,
 ):
-    safe_name = user_name.replace(" ", "_") if user_name else ""
-    safe_tag = user_tag.lstrip("@") if user_tag else ""
-    PUZZLE_CLAIM_LOG.parent.mkdir(parents=True, exist_ok=True)
-    with open(PUZZLE_CLAIM_LOG, "a", encoding="utf-8") as f:
-        f.write(
-            f"[{datetime.now():%Y-%m-%d %H:%M:%S}] user_id={user_id} "
-            f"tg_name={safe_name} tg_tag={safe_tag} получал "
-            f"ec_param={ec_param} puzzle_id={puzzle_id}\n"
-        )
+    log_data = _load_claim_log()
+    key = str(user_id)
+    user_entry = log_data.setdefault(
+        key,
+        {
+            "count": 0,
+            "claimed_puzzles": [],
+            "claimed_ec_params": [],
+            "history": [],
+            "tg_name": "",
+            "tg_tag": "",
+        },
+    )
 
+    if user_name:
+        user_entry["tg_name"] = user_name
+    if user_tag:
+        user_entry["tg_tag"] = user_tag.lstrip("@")
 
-def _parse_log_tokens(line: str) -> Dict[str, str]:
-    """Извлекает пары ключ=значение из строки лога."""
-    tokens: Dict[str, str] = {}
-    for chunk in line.strip().split():
-        if "=" not in chunk:
-            continue
-        key, value = chunk.split("=", 1)
-        tokens[key.strip()] = value.strip()
-    return tokens
+    claimed = user_entry.setdefault("claimed_ec_params", [])
+    if ec_param not in claimed:
+        claimed.append(ec_param)
+
+    claimed_puzzles = user_entry.setdefault("claimed_puzzles", [])
+    if puzzle_id not in claimed_puzzles:
+        claimed_puzzles.append(puzzle_id)
+
+    user_entry.setdefault("history", []).append(
+        {
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "action": "claim_specific_puzzle",
+            "puzzle_id": puzzle_id,
+            "ec_param": ec_param,
+        }
+    )
+    _save_claim_log(log_data)
 
 
 def _has_claim_record(user_id: int, ec_param: str) -> bool:
     """Проверяет, получал ли уже пользователь конкретный ec_param."""
-    if not PUZZLE_CLAIM_LOG.exists():
-        return False
-
-    try:
-        with open(PUZZLE_CLAIM_LOG, "r", encoding="utf-8") as f:
-            for line in f:
-                if "ec_param=" not in line:
-                    continue
-                tokens = _parse_log_tokens(line)
-                if (
-                    tokens.get("user_id") == str(user_id)
-                    and tokens.get("ec_param") == ec_param
-                ):
-                    return True
-    except Exception as e:
-        logger.warning(f"[PUZZLE_CLAIM] Ошибка чтения puzzle_claim.log: {e}")
-    return False
+    data = _load_claim_log()
+    user_entry = data.get(str(user_id), {})
+    claimed_codes = user_entry.get("claimed_ec_params", [])
+    return ec_param in claimed_codes
 
 
 # ─────────────────────────── main ───────────────────────────
