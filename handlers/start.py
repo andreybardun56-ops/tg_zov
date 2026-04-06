@@ -98,7 +98,6 @@ CLAIM_PUZZLES_CB = "claim_puzzles"
 
 PUZZLE_CLAIM_LOG = Path("data/puzzle_claim_log.json")
 START_USERS_LOG = Path("data/start_users.json")
-BROADCAST_REPORT_LOG = Path("data/broadcast_report.json")
 
 
 def _load_puzzle_claim_log() -> dict:
@@ -126,23 +125,6 @@ def _load_start_users_log() -> dict:
 def _save_start_users_log(data: dict) -> None:
     START_USERS_LOG.parent.mkdir(parents=True, exist_ok=True)
     with open(START_USERS_LOG, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-
-def _load_broadcast_report() -> dict:
-    if not BROADCAST_REPORT_LOG.exists():
-        return {}
-    try:
-        with open(BROADCAST_REPORT_LOG, "r", encoding="utf-8") as f:
-            return json.load(f) or {}
-    except Exception as exc:
-        logger.warning("[BROADCAST] ⚠️ Не удалось прочитать broadcast_report.json: %s", exc)
-        return {}
-
-
-def _save_broadcast_report(data: dict) -> None:
-    BROADCAST_REPORT_LOG.parent.mkdir(parents=True, exist_ok=True)
-    with open(BROADCAST_REPORT_LOG, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
@@ -248,6 +230,10 @@ def _build_stats_page(page: int, page_size: int = 7) -> tuple[str, InlineKeyboar
         top_level_logged_users=top_level_logged_users,
         started_users=started_users,
     )
+
+    # Синхронизируем "исторических" пользователей в общей базе аккаунтов,
+    # чтобы они учитывались в user_accounts.json даже без повторного /start.
+    ensure_users_exist(user_ids)
 
     total_users = len(user_ids)
     total_accounts = sum(len(accs) for accs in users.values() if isinstance(accs, list))
@@ -578,33 +564,17 @@ async def do_broadcast(message: types.Message, state: FSMContext):
 
     sent = 0
     failed = 0
-    sent_ids: list[int] = []
-    failed_ids: list[int] = []
     for uid in user_ids:
         try:
             await message.bot.send_message(uid, text)
             sent += 1
-            sent_ids.append(uid)
             await asyncio.sleep(0.03)
         except Exception:
             failed += 1
-            failed_ids.append(uid)
-
-    _save_broadcast_report(
-        {
-            "timestamp": datetime.now().isoformat(timespec="seconds"),
-            "known_total": len(user_ids),
-            "sent": sent,
-            "failed": failed,
-            "sent_ids": sent_ids,
-            "failed_ids": failed_ids,
-        }
-    )
 
     await state.clear()
     await message.answer(
         f"✅ Рассылка завершена.\n"
-        f"👥 Всего известных: <b>{len(user_ids)}</b>\n"
         f"📨 Отправлено: <b>{sent}</b>\n"
         f"❌ Ошибок: <b>{failed}</b>",
         parse_mode="HTML",
