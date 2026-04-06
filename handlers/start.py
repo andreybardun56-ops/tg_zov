@@ -314,6 +314,17 @@ def _build_stats_page(page: int, page_size: int = 7) -> tuple[str, InlineKeyboar
         except Exception:
             lines.append("\n⚠️ Не удалось прочитать puzzle_summary.json")
 
+    broadcast_report = _load_broadcast_report()
+    if broadcast_report:
+        lines.extend([
+            "",
+            "📣 <b>Последняя рассылка</b>",
+            f"🕒 {broadcast_report.get('timestamp', '—')}",
+            f"👥 Известно пользователей: <b>{broadcast_report.get('known_total', 0)}</b>",
+            f"✅ Доставлено: <b>{broadcast_report.get('sent', 0)}</b>",
+            f"❌ Ошибок: <b>{broadcast_report.get('failed', 0)}</b>",
+        ])
+
     keyboard = []
     if total_pages > 1:
         row = []
