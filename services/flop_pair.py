@@ -86,6 +86,141 @@ def _response_indicates_failure(body: str) -> bool:
     return any(marker in lowered for marker in fail_markers)
 
 
+def _extract_first_int(text: str | None, default: int = 0) -> int:
+    if not text:
+        return default
+    digits = "".join(ch if ch.isdigit() else " " for ch in text)
+    for token in digits.split():
+        try:
+            return int(token)
+        except Exception:
+            continue
+    return default
+
+
+async def _read_text_by_selectors(page, selectors: list[str]) -> str:
+    for selector in selectors:
+        try:
+            locator = page.locator(selector).first
+            if await locator.count() > 0:
+                txt = (await locator.inner_text()).strip()
+                if txt:
+                    return txt
+        except Exception:
+            continue
+    return ""
+
+
+async def _read_pool_chances(page) -> tuple[int, int]:
+    """
+    Возвращает:
+      - share_chance: число шансов на распределение
+      - share_points: текущее число очков в пуле (0, если не удалось определить)
+    """
+    share_text = await _read_text_by_selectors(
+        page,
+        [
+            "#share-chance",
+            ".share-chance",
+            "#chance-share",
+            "[data-share-chance]",
+            ".chance-share",
+        ],
+    )
+    points_text = await _read_text_by_selectors(
+        page,
+        [
+            "#share-points",
+            ".share-points",
+            "#pool-points",
+            ".pool-points",
+            "#bonus_num",
+            ".bonus-num",
+        ],
+    )
+
+    share_chance = _extract_first_int(share_text, default=0)
+    share_points = _extract_first_int(points_text, default=0)
+
+    # Фолбэк: иногда значения лежат только в html/js
+    if share_chance == 0 or share_points == 0:
+        try:
+            html = await page.content()
+        except Exception:
+            html = ""
+
+        lowered = html.lower()
+        if share_chance == 0:
+            for marker in ("share_chance", "sharechance", "chance_share"):
+                idx = lowered.find(marker)
+                if idx >= 0:
+                    share_chance = _extract_first_int(html[idx: idx + 80], default=share_chance)
+                    if share_chance > 0:
+                        break
+        if share_points == 0:
+            for marker in ("share_points", "sharepoints", "pool_points", "bonus_num"):
+                idx = lowered.find(marker)
+                if idx >= 0:
+                    share_points = _extract_first_int(html[idx: idx + 120], default=share_points)
+                    if share_points > 0:
+                        break
+
+    return max(0, share_chance), max(0, share_points)
+
+
+async def _collect_pool_rewards(page, share_chance: int) -> tuple[int, int, list[str]]:
+    """
+    Пытается забрать награды из пула.
+    Делает максимально безопасные попытки (кнопка/запрос), не роняя основной сценарий.
+    """
+    if share_chance <= 0:
+        return 0, 0, []
+
+    details: list[str] = []
+    collected = 0
+    remaining = share_chance
+
+    for attempt in range(1, share_chance + 1):
+        clicked = False
+        for selector in (
+            "#share-btn",
+            ".share-btn",
+            ".btn-share",
+            ".receive-btn",
+            "button:has-text('Share')",
+            "button:has-text('Получить')",
+            "a:has-text('Share')",
+            "a:has-text('Получить')",
+        ):
+            try:
+                locator = page.locator(selector).first
+                if await locator.count() > 0:
+                    await locator.click(timeout=1500)
+                    clicked = True
+                    break
+            except Exception:
+                continue
+
+        if not clicked:
+            details.append("⚠️ Не нашёл кнопку получения награды из пула.")
+            break
+
+        await asyncio.sleep(1.2)
+        new_chance, _ = await _read_pool_chances(page)
+        if new_chance < remaining:
+            collected += 1
+            remaining = new_chance
+            details.append(f"• Забор из пула #{attempt}: успешно")
+            if remaining <= 0:
+                break
+        else:
+            details.append(f"• Забор из пула #{attempt}: без изменений")
+            # если шанс не уменьшился, повторять обычно бессмысленно
+            break
+
+    return collected, remaining, details
+
+
 def _build_pairs_preview(cards_data: list[dict], pairs: list[dict], hash_map: dict[str, list[dict]]) -> str:
     """
     Формирует мини-превью поля 5/5/4 и легенду, чтобы было видно где лежат пары.
