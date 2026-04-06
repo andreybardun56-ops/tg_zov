@@ -239,13 +239,7 @@ async def _collect_pool_rewards(page, share_chance: int) -> tuple[int, int, list
 
     for attempt in range(1, share_chance + 1):
         prev_remaining = remaining
-        resp = await page.goto(SHARE_URL, wait_until="domcontentloaded")
-        body = ""
-        if resp:
-            try:
-                body = await resp.text()
-            except Exception:
-                body = ""
+        body = await _fetch_event_action(page, SHARE_URL)
 
         await asyncio.sleep(1.0)
         new_chance, _ = await _read_pool_chances(page)
@@ -275,6 +269,36 @@ async def _collect_pool_rewards(page, share_chance: int) -> tuple[int, int, list
             break
 
     return collected, remaining, details
+
+
+async def _fetch_event_action(page, url: str) -> str:
+    """
+    Делает ajax-запрос из контекста страницы (с текущими cookies/session),
+    не уводя вкладку на JSON-эндпоинт через page.goto().
+    """
+    script = """
+    async (targetUrl) => {
+      try {
+        const response = await fetch(targetUrl, {
+          method: "GET",
+          credentials: "include",
+          headers: {
+            "X-Requested-With": "XMLHttpRequest",
+            "Accept": "application/json, text/plain, */*"
+          },
+          cache: "no-store"
+        });
+        return await response.text();
+      } catch (e) {
+        return "";
+      }
+    }
+    """
+    try:
+        body = await page.evaluate(script, url)
+        return body if isinstance(body, str) else ""
+    except Exception:
+        return ""
 
 
 def _resolve_account(user_id: str, uid: str | None) -> dict | None:
@@ -601,13 +625,7 @@ async def run_flop_pair(user_id: str, uid: str = None, context=None):
             last_payload: dict = {}
 
             for card_idx, pid in enumerate((p["c1"], p["c2"]), start=1):
-                resp = await page.goto(AJAX_URL.format(pair_id=pid), wait_until="domcontentloaded")
-                body = ""
-                if resp:
-                    try:
-                        body = await resp.text()
-                    except Exception:
-                        body = ""
+                body = await _fetch_event_action(page, AJAX_URL.format(pair_id=pid))
 
                 if _body_indicates_event_inactive(body):
                     return {
