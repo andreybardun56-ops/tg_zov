@@ -15,6 +15,7 @@ logger = logging.getLogger("flop_pair")
 
 BASE_URL = "https://event-eu-cc.igg.com/event/flop_pair/"
 AJAX_URL = "https://event-eu-cc.igg.com/event/flop_pair/ajax.req.php?action=flop&id={pair_id}"
+SHARE_URL = "https://event-eu-cc.igg.com/event/flop_pair/ajax.req.php?action=share"
 PAIRS_FILE = os.path.join("data", "flop_pairs.json")
 EVENT_INACTIVE_MARKERS = (
     "событие еще не началось",
@@ -181,44 +182,54 @@ async def _collect_pool_rewards(page, share_chance: int) -> tuple[int, int, list
     remaining = share_chance
 
     for attempt in range(1, share_chance + 1):
-        clicked = False
-        for selector in (
-            "#share-btn",
-            ".share-btn",
-            ".btn-share",
-            ".receive-btn",
-            "button:has-text('Share')",
-            "button:has-text('Получить')",
-            "a:has-text('Share')",
-            "a:has-text('Получить')",
-        ):
+        prev_remaining = remaining
+        resp = await page.goto(SHARE_URL, wait_until="domcontentloaded")
+        body = ""
+        if resp:
             try:
-                locator = page.locator(selector).first
-                if await locator.count() > 0:
-                    await locator.click(timeout=1500)
-                    clicked = True
-                    break
+                body = await resp.text()
             except Exception:
-                continue
+                body = ""
 
-        if not clicked:
-            details.append("⚠️ Не нашёл кнопку получения награды из пула.")
-            break
-
-        await asyncio.sleep(1.2)
+        await asyncio.sleep(1.0)
         new_chance, _ = await _read_pool_chances(page)
-        if new_chance < remaining:
-            collected += 1
+
+        msg = ""
+        try:
+            payload = json.loads(body) if body else {}
+            msg = str(payload.get("msg", "")).strip()
+            chance_data = payload.get("chance") if isinstance(payload, dict) else None
+            if isinstance(chance_data, dict):
+                remaining = int(chance_data.get("left", new_chance) or new_chance)
+        except Exception:
+            pass
+
+        if remaining == prev_remaining and new_chance != remaining:
             remaining = new_chance
-            details.append(f"• Забор из пула #{attempt}: успешно")
-            if remaining <= 0:
-                break
+
+        if remaining < prev_remaining:
+            collected += 1
+
+        if msg:
+            details.append(f"• Пул #{attempt}: {msg}")
         else:
-            details.append(f"• Забор из пула #{attempt}: без изменений")
-            # если шанс не уменьшился, повторять обычно бессмысленно
+            details.append(f"• Пул #{attempt}: выполнен запрос share")
+
+        if remaining <= 0:
             break
 
     return collected, remaining, details
+
+
+def _resolve_account(user_id: str, uid: str | None) -> dict | None:
+    accounts = get_all_accounts(user_id)
+    if not accounts:
+        return None
+    if uid:
+        found = next((a for a in accounts if str(a.get("uid")) == str(uid)), None)
+        if found:
+            return found
+    return accounts[0]
 
 
 def _build_pairs_preview(cards_data: list[dict], pairs: list[dict], hash_map: dict[str, list[dict]]) -> str:
@@ -337,12 +348,11 @@ async def hash_image(session: aiohttp.ClientSession, url: str, retries: int = 3)
 
 # === Этап 1: поиск пар ===
 async def find_flop_pairs(user_id: str, uid: str = None, context=None):
-    accounts = get_all_accounts(user_id)
-    if not accounts:
+    acc = _resolve_account(user_id, uid)
+    if not acc:
         return {"success": False, "message": "⚠️ У пользователя нет аккаунтов."}
 
-    acc = next((a for a in accounts if a.get("uid") == uid), accounts[0])
-    uid = acc.get("uid")
+    uid = str(acc.get("uid") or "")
     username = acc.get("username", "Игрок")
 
     cookies = load_cookies_for_account(user_id, uid)
@@ -432,6 +442,13 @@ async def run_flop_pair(user_id: str, uid: str = None, context=None):
     """
     Ежедневное открытие пар. Пропускает уже открытые пары.
     """
+    acc = _resolve_account(user_id, uid)
+    if not acc:
+        return {"success": False, "message": "⚠️ У пользователя нет аккаунтов."}
+
+    uid = str(acc.get("uid") or "")
+    username = acc.get("username", "Игрок")
+
     stored, account_data = _load_account_storage(user_id, uid)
     pairs = account_data.get("pairs", [])
     opened_pairs = {
@@ -517,12 +534,18 @@ async def run_flop_pair(user_id: str, uid: str = None, context=None):
 
         opened = 0
         rewards = []
+        open_target = pairs_to_open[:1]
 
-        for i, p in enumerate(pairs_to_open, 1):
+        for i, p in enumerate(open_target, 1):
             if attempts < 2:
+                rewards.append("⚠️ Не хватает попыток для открытия следующей пары (нужно 2).")
                 break
+
             pair_opened = True
-            for pid in (p["c1"], p["c2"]):
+            pair_msgs: list[str] = []
+            last_payload: dict = {}
+
+            for card_idx, pid in enumerate((p["c1"], p["c2"]), start=1):
                 resp = await page.goto(AJAX_URL.format(pair_id=pid), wait_until="domcontentloaded")
                 body = ""
                 if resp:
@@ -537,10 +560,29 @@ async def run_flop_pair(user_id: str, uid: str = None, context=None):
                         "message": "⚠️ Сервер вернул: событие ещё не началось или уже завершилось. Пары не были открыты.",
                     }
 
-                await asyncio.sleep(2)
                 attempts -= 1
+
+                parsed = {}
+                try:
+                    parsed = json.loads(body) if body else {}
+                except Exception:
+                    parsed = {}
+                if isinstance(parsed, dict):
+                    last_payload = parsed
+                    msg = str(parsed.get("msg", "")).strip()
+                    if msg:
+                        pair_msgs.append(f"• Карта {card_idx}: {msg}")
+
+                    chance_data = parsed.get("chance")
+                    if isinstance(chance_data, dict):
+                        left = int(chance_data.get("left", 0) or 0)
+                        free = int(chance_data.get("free", 0) or 0)
+                        pair_msgs.append(f"• Шансы открытия: left={left}, free={free}")
+
                 if _response_indicates_failure(body):
                     pair_opened = False
+
+                await asyncio.sleep(1.2)
 
             if pair_opened:
                 opened += 1
@@ -548,7 +590,28 @@ async def run_flop_pair(user_id: str, uid: str = None, context=None):
                 opened_pairs.add(_normalize_pair(p["c1"], p["c2"]))
             else:
                 rewards.append(f"#{i} ⚠️ {p['c1']} + {p['c2']} → не подтверждено сервером")
-            await asyncio.sleep(2)
+
+            if pair_msgs:
+                rewards.extend(pair_msgs)
+
+            chance_after_pair = 0
+            pool_after_pair = 0
+            chance_data = last_payload.get("chance") if isinstance(last_payload, dict) else {}
+            if isinstance(chance_data, dict):
+                chance_after_pair = int(chance_data.get("left", 0) or 0)
+            user_extra = last_payload.get("user_extra") if isinstance(last_payload, dict) else {}
+            if isinstance(user_extra, dict):
+                share_data = user_extra.get("share")
+                if isinstance(share_data, dict):
+                    chance_after_pair = int(share_data.get("left", chance_after_pair) or chance_after_pair)
+                    pool_after_pair = int(share_data.get("sum", 0) or 0)
+
+            if chance_after_pair > 0:
+                rewards.append(f"🎁 После 2-й карты: шансы пула={chance_after_pair}, пул={pool_after_pair}")
+                collected, remaining, collect_details = await _collect_pool_rewards(page, chance_after_pair)
+                rewards.append(f"🎁 Забрано из пула: {collected}, осталось шансов: {remaining}")
+                rewards.extend(collect_details)
+            await asyncio.sleep(1.5)
 
         # сохраняем обновлённые открытые
         stored_account_data = stored.setdefault("accounts", {}).setdefault(_account_key(user_id, uid), {})
@@ -558,9 +621,11 @@ async def run_flop_pair(user_id: str, uid: str = None, context=None):
             json.dump(stored, f, indent=2, ensure_ascii=False)
 
         summary = [
-            f"📊 Открыто пар: {opened}/{len(pairs_to_open)}",
+            f"👤 Аккаунт: {username} ({uid})",
+            f"📊 Открыто пар за запуск: {opened}/{len(open_target)}",
             f"🔢 Осталось попыток: {attempts}",
         ]
+        summary.append(f"🗂 Осталось неоткрытых пар: {max(0, len(pairs_to_open) - opened)}")
         if already_open:
             summary.append(f"🔁 Пропущено пар: {already_open} (уже были открыты)")
         share_chance, share_points = await _read_pool_chances(page)
