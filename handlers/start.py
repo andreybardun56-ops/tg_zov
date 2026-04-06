@@ -231,6 +231,10 @@ def _build_stats_page(page: int, page_size: int = 7) -> tuple[str, InlineKeyboar
         started_users=started_users,
     )
 
+    # Синхронизируем "исторических" пользователей в общей базе аккаунтов,
+    # чтобы они учитывались в user_accounts.json даже без повторного /start.
+    ensure_users_exist(user_ids)
+
     total_users = len(user_ids)
     total_accounts = sum(len(accs) for accs in users.values() if isinstance(accs, list))
 
