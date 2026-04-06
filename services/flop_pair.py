@@ -125,8 +125,12 @@ def _response_indicates_failure(body: str) -> bool:
                 return True
 
         success = data.get("success")
-        if success in (False, 0, "0", "false", "False"):
-            return True
+        # Для flop_pair некоторые успешные ответы приходят с success=0,
+        # поэтому считаем ошибкой только явное текстовое/булево отрицание.
+        if success in (False, "false", "False"):
+            msg = str(data.get("msg", "")).lower()
+            if not msg or any(marker in msg for marker in ("error", "ошиб", "invalid", "forbid", "denied", "fail")):
+                return True
 
         msg = str(data.get("msg", "")).lower()
         if msg and any(marker in msg for marker in ("error", "ошиб", "invalid", "forbid", "denied", "fail")):
