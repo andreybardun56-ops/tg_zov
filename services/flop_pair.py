@@ -612,14 +612,19 @@ async def run_flop_pair(user_id: str, uid: str = None, context=None):
             return {"success": False, "message": "⚠️ Попыток не осталось."}
 
         opened = 0
+        marked_as_open = 0
+        attempted_pairs = 0
         rewards = []
-        open_target = pairs_to_open[:1]
+        open_target = pairs_to_open
 
         for i, p in enumerate(open_target, 1):
+            if opened >= 1:
+                break
             if attempts < 2:
                 rewards.append("⚠️ Не хватает попыток для открытия следующей пары (нужно 2).")
                 break
 
+            attempted_pairs += 1
             pair_opened = True
             pair_msgs: list[str] = []
             last_payload: dict = {}
@@ -662,7 +667,11 @@ async def run_flop_pair(user_id: str, uid: str = None, context=None):
                 rewards.append(f"#{i} 🎯 {p['c1']} + {p['c2']} → Открыто")
                 opened_pairs.add(_normalize_pair(p["c1"], p["c2"]))
             else:
-                rewards.append(f"#{i} ⚠️ {p['c1']} + {p['c2']} → не подтверждено сервером")
+                marked_as_open += 1
+                opened_pairs.add(_normalize_pair(p["c1"], p["c2"]))
+                rewards.append(
+                    f"#{i} ℹ️ {p['c1']} + {p['c2']} → сервер не подтвердил открытие, считаю пару уже открытой и перехожу к следующей"
+                )
 
             if pair_msgs:
                 rewards.extend(pair_msgs)
@@ -695,10 +704,13 @@ async def run_flop_pair(user_id: str, uid: str = None, context=None):
 
         summary = [
             f"👤 Аккаунт: {username} ({uid})",
-            f"📊 Открыто пар за запуск: {opened}/{len(open_target)}",
+            f"📊 Открыто пар за запуск: {opened}/1",
+            f"🧪 Проверено пар за запуск: {attempted_pairs}",
             f"🔢 Осталось попыток: {attempts}",
         ]
-        summary.append(f"🗂 Осталось неоткрытых пар: {max(0, len(pairs_to_open) - opened)}")
+        if marked_as_open:
+            summary.append(f"ℹ️ Помечено как уже открытые (по ответу сервера): {marked_as_open}")
+        summary.append(f"🗂 Осталось неоткрытых пар: {max(0, len(pairs_to_open) - opened - marked_as_open)}")
         if already_open:
             summary.append(f"🔁 Пропущено пар: {already_open} (уже были открыты)")
         share_chance, share_points = await _read_pool_chances(page)
