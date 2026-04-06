@@ -189,11 +189,28 @@ def _extract_user_stats(log_data: dict, user_id: str) -> tuple[int, str, str]:
     return total_puzzles, name, tag
 
 
-def _build_stats_page(page: int, page_size: int = 7) -> tuple[str, InlineKeyboardMarkup | None]:
-    users = load_all_users()
-
+def _collect_known_user_ids(
+    users: dict,
+    log_users: dict,
+    users_meta: dict,
+    top_level_logged_users: set[str],
+    started_users: dict,
+) -> list[str]:
     def _sort_key(val: str):
         return int(val) if str(val).isdigit() else str(val)
+
+    return sorted(
+        {str(uid) for uid in users.keys()}
+        | {str(uid) for uid in log_users.keys()}
+        | {str(uid) for uid in users_meta.keys()}
+        | top_level_logged_users
+        | {str(uid) for uid in started_users.keys()},
+        key=_sort_key,
+    )
+
+
+def _build_stats_page(page: int, page_size: int = 7) -> tuple[str, InlineKeyboardMarkup | None]:
+    users = load_all_users()
 
     log_data = _load_puzzle_claim_log()
     log_users = log_data.get("users", {}) if isinstance(log_data, dict) else {}
@@ -206,13 +223,12 @@ def _build_stats_page(page: int, page_size: int = 7) -> tuple[str, InlineKeyboar
     }
 
     # Показываем всех: и тех, у кого есть аккаунты, и тех, кто только получал пазлы.
-    user_ids = sorted(
-        {str(uid) for uid in users.keys()}
-        | {str(uid) for uid in log_users.keys()}
-        | {str(uid) for uid in users_meta.keys()}
-        | top_level_logged_users
-        | {str(uid) for uid in started_users.keys()},
-        key=_sort_key,
+    user_ids = _collect_known_user_ids(
+        users=users,
+        log_users=log_users,
+        users_meta=users_meta,
+        top_level_logged_users=top_level_logged_users,
+        started_users=started_users,
     )
 
     # Синхронизируем "исторических" пользователей в общей базе аккаунтов,
@@ -247,17 +263,24 @@ def _build_stats_page(page: int, page_size: int = 7) -> tuple[str, InlineKeyboar
             started = started_users.get(str(user_id), {}) if isinstance(started_users, dict) else {}
             auto_name = user_log.get("tg_name", "") if isinstance(user_log, dict) else ""
             auto_tag = user_log.get("tg_tag", "") if isinstance(user_log, dict) else ""
+            first_account_name = ""
+            if accs and isinstance(accs[0], dict):
+                first_account_name = str(accs[0].get("username", "") or "")
+
             display_name = (
-                meta.get("name") or meta.get("username")
+                meta.get("name")
                 or started.get("name")
                 or auto_name
                 or direct_name
+                or first_account_name
             )
             display_tag = (
-                meta.get("tag") or meta.get("username")
+                meta.get("tag")
                 or started.get("tag")
                 or auto_tag
                 or direct_tag
+                or meta.get("username")
+                or started.get("username")
             )
             display_bits = " ".join(bit for bit in [display_name, f"@{display_tag}" if display_tag else ""] if bit)
             label = f"{user_id}"
@@ -405,6 +428,40 @@ async def show_stats(message: types.Message):
 
     text, markup = _build_stats_page(0)
     await message.answer(text, parse_mode="HTML", reply_markup=markup)
+
+
+@router.message(F.text == "🧾 Синхронизировать users")
+async def sync_users_to_accounts_db(message: types.Message):
+    if not _is_admin(message.from_user.id):
+        await message.answer("🚫 У тебя нет доступа.")
+        return
+
+    users = load_all_users()
+    log_data = _load_puzzle_claim_log()
+    log_users = log_data.get("users", {}) if isinstance(log_data, dict) else {}
+    users_meta = log_data.get("users_meta", {}) if isinstance(log_data, dict) else {}
+    start_data = _load_start_users_log()
+    started_users = start_data.get("users", {}) if isinstance(start_data, dict) else {}
+    top_level_logged_users = {
+        str(k) for k, v in log_data.items()
+        if isinstance(log_data, dict) and str(k).isdigit() and isinstance(v, dict)
+    }
+
+    user_ids = _collect_known_user_ids(
+        users=users,
+        log_users=log_users,
+        users_meta=users_meta,
+        top_level_logged_users=top_level_logged_users,
+        started_users=started_users,
+    )
+    added = ensure_users_exist(user_ids)
+
+    await message.answer(
+        "✅ Синхронизация users выполнена.\n"
+        f"👥 Найдено пользователей: <b>{len(user_ids)}</b>\n"
+        f"➕ Добавлено в user_accounts.json: <b>{added}</b>",
+        parse_mode="HTML",
+    )
 
 
 @router.callback_query(F.data.startswith("stats_page:"))
