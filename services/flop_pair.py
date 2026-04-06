@@ -360,50 +360,73 @@ def _build_pairs_preview(cards_data: list[dict], pairs: list[dict], hash_map: di
     return "\n".join(msg)
 
 
-def _load_account_storage(user_id: str | None, uid: str | None) -> tuple[dict, dict]:
+def _load_account_storage(user_id: str | None, uid: str | None) -> tuple[dict, dict, dict]:
     """
-    Загружает общее состояние и данные конкретного аккаунта.
+    Загружает общее состояние, общие пары события и данные конкретного аккаунта.
 
-    Файл переиспользуется для нескольких аккаунтов, поэтому структура хранится так:
+    Структура хранится так:
     {
+        "shared": {
+            "pairs": [...],
+            "event_period": "...",
+            "updated": "..."
+        },
         "accounts": {
             "<uid>": {
-                "pairs": [...],
                 "opened_pairs": [...],
                 "updated": "..."
             }
         }
     }
 
-    Старый формат (без "accounts") автоматически мигрируется.
+    Старые форматы автоматически мигрируются.
     """
 
     key = _account_key(user_id, uid)
     stored = safe_load_json(PAIRS_FILE) or {}
+    if not isinstance(stored, dict):
+        stored = {}
+
+    if "shared" not in stored:
+        stored["shared"] = {}
 
     if "accounts" not in stored:
-        # старый формат — переносим данные под текущий ключ
+        # Старый формат без accounts/shared.
         legacy_pairs = stored.get("pairs", [])
         legacy_opened = stored.get("opened_pairs", [])
         legacy_updated = stored.get("updated")
         legacy_event_period = stored.get("event_period")
-        stored = {"accounts": {}}
+        stored = {"shared": {}, "accounts": {}}
         stored["accounts"][key] = {}
         if legacy_pairs:
-            stored["accounts"][key]["pairs"] = legacy_pairs
+            stored["shared"]["pairs"] = legacy_pairs
         if legacy_opened:
             stored["accounts"][key]["opened_pairs"] = legacy_opened
         if legacy_updated:
-            stored["accounts"][key]["updated"] = legacy_updated
+            stored["shared"]["updated"] = legacy_updated
         if legacy_event_period:
-            stored["accounts"][key]["event_period"] = legacy_event_period
+            stored["shared"]["event_period"] = legacy_event_period
 
     accounts = stored.setdefault("accounts", {})
-    account_data = accounts.setdefault(key, {})
-    account_data.setdefault("pairs", [])
-    account_data.setdefault("opened_pairs", [])
+    shared_data = stored.setdefault("shared", {})
 
-    return stored, account_data
+    # Миграция: если пары ранее лежали у аккаунтов, переносим в shared.
+    if not shared_data.get("pairs"):
+        for account in accounts.values():
+            if isinstance(account, dict) and account.get("pairs"):
+                shared_data["pairs"] = account.get("pairs", [])
+                if account.get("event_period"):
+                    shared_data["event_period"] = account.get("event_period")
+                if account.get("updated"):
+                    shared_data["updated"] = account.get("updated")
+                break
+
+    account_data = accounts.setdefault(key, {})
+    shared_data.setdefault("pairs", [])
+    account_data.setdefault("opened_pairs", [])
+    shared_data.setdefault("event_period", "")
+
+    return stored, shared_data, account_data
 
 # === ВСПОМОГАТЕЛЬНЫЕ ===
 def safe_load_json(path: str) -> dict:
@@ -487,17 +510,17 @@ async def find_flop_pairs(user_id: str, uid: str = None, context=None):
         if not pairs:
             return {"success": False, "message": f"⚠️ Совпадающих карт не найдено ({username})."}
 
-        stored, account_data = _load_account_storage(user_id, uid)
-        previous_period = account_data.get("event_period")
+        stored, shared_data, account_data = _load_account_storage(user_id, uid)
+        previous_period = shared_data.get("event_period")
         if event_period and previous_period and event_period != previous_period:
             # Новый период события: чистим старые данные, чтобы не пытаться открыть вчерашние пары
-            account_data["pairs"] = []
+            shared_data["pairs"] = []
             account_data["opened_pairs"] = []
 
-        account_data["pairs"] = pairs
-        account_data["updated"] = datetime.now().isoformat()
+        shared_data["pairs"] = pairs
+        shared_data["updated"] = datetime.now().isoformat()
         if event_period:
-            account_data["event_period"] = event_period
+            shared_data["event_period"] = event_period
         # сохраняем уже открытые пары, оставляя только те, что присутствуют в новом списке
         existing_opened = {
             _normalize_pair(p[0], p[1])
@@ -529,26 +552,32 @@ async def run_flop_pair(user_id: str, uid: str = None, context=None):
     uid = str(acc.get("uid") or "")
     username = acc.get("username", "Игрок")
 
-    stored, account_data = _load_account_storage(user_id, uid)
-    pairs = account_data.get("pairs", [])
+    stored, shared_data, account_data = _load_account_storage(user_id, uid)
+    pairs = shared_data.get("pairs", [])
     opened_pairs = {
         _normalize_pair(x[0], x[1])
         for x in account_data.get("opened_pairs", [])
         if isinstance(x, (list, tuple)) and len(x) == 2
     }
+    valid_pairs = {_normalize_pair(p["c1"], p["c2"]) for p in pairs if isinstance(p, dict)}
+    if valid_pairs:
+        opened_pairs = opened_pairs & valid_pairs
 
     if not pairs:
         logger.info("[FLOP] 🔄 Нет сохранённых пар — пересканируем.")
         res = await find_flop_pairs(user_id, uid)
         if not res.get("success"):
             return res
-        stored, account_data = _load_account_storage(user_id, uid)
-        pairs = account_data.get("pairs", [])
+        stored, shared_data, account_data = _load_account_storage(user_id, uid)
+        pairs = shared_data.get("pairs", [])
         opened_pairs = {
             _normalize_pair(x[0], x[1])
             for x in account_data.get("opened_pairs", [])
             if isinstance(x, (list, tuple)) and len(x) == 2
         }
+        valid_pairs = {_normalize_pair(p["c1"], p["c2"]) for p in pairs if isinstance(p, dict)}
+        if valid_pairs:
+            opened_pairs = opened_pairs & valid_pairs
 
     if not pairs:
         return {"success": False, "message": "⚠️ Пары не найдены даже после пересканирования."}
@@ -586,12 +615,12 @@ async def run_flop_pair(user_id: str, uid: str = None, context=None):
         except Exception:
             current_period = ""
 
-        saved_period = account_data.get("event_period", "")
+        saved_period = shared_data.get("event_period", "")
         if current_period and saved_period and current_period != saved_period:
             logger.info("[FLOP] 🔄 Обнаружен новый период события (%s -> %s), пересканирую пары.", saved_period, current_period)
-            account_data["pairs"] = []
+            shared_data["pairs"] = []
             account_data["opened_pairs"] = []
-            account_data["event_period"] = current_period
+            shared_data["event_period"] = current_period
             os.makedirs(os.path.dirname(PAIRS_FILE), exist_ok=True)
             with open(PAIRS_FILE, "w", encoding="utf-8") as f:
                 json.dump(stored, f, indent=2, ensure_ascii=False)
@@ -697,8 +726,8 @@ async def run_flop_pair(user_id: str, uid: str = None, context=None):
 
         # сохраняем обновлённые открытые
         stored_account_data = stored.setdefault("accounts", {}).setdefault(_account_key(user_id, uid), {})
-        stored_account_data["pairs"] = pairs
         stored_account_data["opened_pairs"] = [list(x) for x in sorted(opened_pairs)]
+        stored.setdefault("shared", {})["pairs"] = pairs
         with open(PAIRS_FILE, "w", encoding="utf-8") as f:
             json.dump(stored, f, indent=2, ensure_ascii=False)
 
