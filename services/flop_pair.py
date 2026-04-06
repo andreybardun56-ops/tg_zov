@@ -428,6 +428,16 @@ async def run_flop_pair(user_id: str, uid: str = None, context=None):
         ]
         if already_open:
             summary.append(f"🔁 Пропущено пар: {already_open} (уже были открыты)")
+        share_chance, share_points = await _read_pool_chances(page)
+        summary.append(f"🎁 Шансы распределения: {share_chance}")
+        if share_points:
+            summary.append(f"💎 Текущий пул призов: {share_points}/50000000")
+        if share_chance > 0:
+            summary.append("🚀 Есть шансы в пуле — пошел собирать...")
+            collected, remaining, collect_details = await _collect_pool_rewards(page, share_chance)
+            summary.append(f"🎁 Собрано наград из пула: {collected}")
+            summary.append(f"🎯 Осталось шансов в пуле: {remaining}")
+            summary.extend(collect_details)
         summary.append("")
         summary.extend(rewards)
         summary.append("✅ Ежедневное открытие завершено!")
