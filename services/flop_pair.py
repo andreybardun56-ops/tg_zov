@@ -44,97 +44,46 @@ def _is_event_inactive_text(text: str) -> bool:
     return any(marker in lowered for marker in EVENT_INACTIVE_MARKERS)
 
 
-async def _read_pool_chances(page) -> tuple[int, str]:
+def _response_indicates_failure(body: str) -> bool:
     """
-    Читает шансы распределения и текущее значение пула из блока `.fen-controls`.
-    Возвращает: (share_chance, share_points_text).
+    Пытается определить, что сервер явно вернул ошибку открытия карты.
+    Важно: для этого события `code/ret = 0` может быть успешным ответом,
+    поэтому не считаем это ошибкой автоматически.
     """
-    share_chance = 0
-    share_points = ""
-    try:
-        chance_text = await page.locator("#share-chance").first.inner_text(timeout=3000)
-        share_chance = int((chance_text or "").strip() or "0")
-    except Exception:
-        share_chance = 0
+    if not body:
+        return False
 
     try:
-        share_points = ((await page.locator("#share-points").first.inner_text(timeout=3000)) or "").strip()
+        data = json.loads(body)
     except Exception:
-        share_points = ""
+        data = None
 
-    return share_chance, share_points
+    if isinstance(data, dict):
+        # Частые поля явной ошибки в JSON-ответах
+        for key in ("error", "errno", "err_code"):
+            value = data.get(key)
+            if isinstance(value, bool):
+                if value:
+                    return True
+            elif isinstance(value, (int, float)):
+                if value > 0:
+                    return True
+            elif isinstance(value, str) and value.strip() not in ("", "0", "ok", "success"):
+                return True
 
+        success = data.get("success")
+        if success in (False, 0, "0", "false", "False"):
+            return True
 
-async def _collect_pool_rewards(page, max_collect: int) -> tuple[int, int, list[str]]:
-    """
-    Нажимает кнопку распределения и пытается собрать награды `max_collect` раз.
-    Возвращает (collected_count, remaining_chances, details_lines).
-    """
-    collected = 0
-    details: list[str] = []
-    remaining = max(0, int(max_collect or 0))
+        msg = str(data.get("msg", "")).lower()
+        if msg and any(marker in msg for marker in ("error", "ошиб", "invalid", "forbid", "denied", "fail")):
+            return True
 
-    for idx in range(1, remaining + 1):
-        try:
-            before, _ = await _read_pool_chances(page)
-            if before <= 0:
-                remaining = 0
-                break
+        return False
 
-            clicked = False
-            for selector in (".get-btn", ".fen-controls .get-btn", "text=Распределение", "text=Distribution"):
-                try:
-                    btn = page.locator(selector).first
-                    if await btn.count() > 0:
-                        await btn.click(timeout=5000)
-                        clicked = True
-                        break
-                except Exception:
-                    continue
-
-            if not clicked:
-                details.append(f"#{idx} ⚠️ Кнопка «Распределение» не найдена.")
-                break
-
-            await asyncio.sleep(1.5)
-
-            reward_text = ""
-            for selector in (".reward-pop", ".pop", ".popup", ".dialog", ".award", ".result"):
-                try:
-                    loc = page.locator(selector).first
-                    if await loc.count() > 0:
-                        reward_text = (await loc.inner_text(timeout=1000)).strip()
-                        if reward_text:
-                            break
-                except Exception:
-                    continue
-            reward_text = reward_text[:140] if reward_text else "награда получена"
-
-            # Закрываем возможный попап
-            for selector in (".pop .close", ".popup .close", ".dialog .close", "text=Закрыть", "text=Close"):
-                try:
-                    close_btn = page.locator(selector).first
-                    if await close_btn.count() > 0:
-                        await close_btn.click(timeout=1200)
-                        break
-                except Exception:
-                    continue
-
-            await asyncio.sleep(0.8)
-            after, _ = await _read_pool_chances(page)
-            if after < before:
-                collected += 1
-                remaining = after
-                details.append(f"#{idx} ✅ {reward_text}")
-            else:
-                remaining = after
-                details.append(f"#{idx} ⚠️ Сервер не подтвердил списание шанса.")
-                break
-        except Exception as exc:
-            details.append(f"#{idx} ⚠️ Ошибка сбора: {exc}")
-            break
-
-    return collected, remaining, details
+    lowered = body.lower()
+    fail_markers = ("ошибка", "error", "failed", "forbidden", "denied", "invalid")
+    return any(marker in lowered for marker in fail_markers)
 
 
 def _build_pairs_preview(cards_data: list[dict], pairs: list[dict], hash_map: dict[str, list[dict]]) -> str:
@@ -395,6 +344,7 @@ async def run_flop_pair(user_id: str, uid: str = None, context=None):
         html = (await page.content()).lower()
         if _is_event_inactive_text(html):
             return {"success": True, "message": "⚠️ Событие ещё не началось или уже завершилось."}
+        share_chance, share_points = await _read_pool_chances(page)
 
         # Если период события сменился — не используем старые пары
         current_period = ""
@@ -454,7 +404,7 @@ async def run_flop_pair(user_id: str, uid: str = None, context=None):
 
                 await asyncio.sleep(2)
                 attempts -= 1
-                if body and any(x in body.lower() for x in ("error", "\"ret\":0", "\"code\":0")):
+                if _response_indicates_failure(body):
                     pair_opened = False
 
             if pair_opened:
@@ -466,9 +416,9 @@ async def run_flop_pair(user_id: str, uid: str = None, context=None):
             await asyncio.sleep(2)
 
         # сохраняем обновлённые открытые
-        account_data = stored.setdefault("accounts", {}).setdefault(_account_key(user_id, uid), {})
-        account_data["pairs"] = pairs
-        account_data["opened_pairs"] = [list(x) for x in sorted(opened_pairs)]
+        stored_account_data = stored.setdefault("accounts", {}).setdefault(_account_key(user_id, uid), {})
+        stored_account_data["pairs"] = pairs
+        stored_account_data["opened_pairs"] = [list(x) for x in sorted(opened_pairs)]
         with open(PAIRS_FILE, "w", encoding="utf-8") as f:
             json.dump(stored, f, indent=2, ensure_ascii=False)
 

@@ -3,6 +3,7 @@ import json
 import os
 from typing import List, Optional
 from pathlib import Path
+from datetime import datetime
 import shutil
 from services.logger import logger
 from aiogram import Router, types, F
@@ -96,6 +97,7 @@ for path in (
 CLAIM_PUZZLES_CB = "claim_puzzles"
 
 PUZZLE_CLAIM_LOG = Path("data/puzzle_claim_log.json")
+START_USERS_LOG = Path("data/start_users.json")
 
 
 def _load_puzzle_claim_log() -> dict:
@@ -109,6 +111,84 @@ def _load_puzzle_claim_log() -> dict:
         return {}
 
 
+def _load_start_users_log() -> dict:
+    if not START_USERS_LOG.exists():
+        return {}
+    try:
+        with open(START_USERS_LOG, "r", encoding="utf-8") as f:
+            return json.load(f) or {}
+    except Exception as exc:
+        logger.warning("[STATS] ⚠️ Не удалось прочитать start_users.json: %s", exc)
+        return {}
+
+
+def _save_start_users_log(data: dict) -> None:
+    START_USERS_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with open(START_USERS_LOG, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _register_started_user(tg_user: types.User | None) -> None:
+    if tg_user is None:
+        return
+    log_data = _load_start_users_log()
+    users = log_data.setdefault("users", {})
+    uid = str(tg_user.id)
+    now = datetime.now().isoformat(timespec="seconds")
+    entry = users.setdefault(uid, {"first_seen": now})
+    entry["last_seen"] = now
+    entry["name"] = tg_user.full_name or entry.get("name", "")
+    entry["tag"] = tg_user.username or entry.get("tag", "")
+    _save_start_users_log(log_data)
+
+
+def _extract_user_stats(log_data: dict, user_id: str) -> tuple[int, str, str]:
+    """
+    Возвращает (total_puzzles, tg_name, tg_tag) для user_id,
+    поддерживая оба формата puzzle_claim_log.json:
+    1) users.{tg_user_id}.{iggid}.{count}
+    2) {tg_user_id: {count, claimed_ec_params, tg_name, tg_tag, ...}}
+    """
+    total_puzzles = 0
+    name = ""
+    tag = ""
+    user_id = str(user_id)
+
+    if not isinstance(log_data, dict):
+        return total_puzzles, name, tag
+
+    # Формат auto-claim
+    users_section = log_data.get("users", {})
+    if isinstance(users_section, dict):
+        u = users_section.get(user_id, {})
+        if isinstance(u, dict):
+            for entry in u.values():
+                if isinstance(entry, dict):
+                    try:
+                        total_puzzles += int(entry.get("count", 0) or 0)
+                    except (TypeError, ValueError):
+                        pass
+
+    # Формат ручной выдачи / кодов (верхний уровень)
+    top_entry = log_data.get(user_id, {})
+    if isinstance(top_entry, dict):
+        name = top_entry.get("tg_name", "") or name
+        tag = top_entry.get("tg_tag", "") or tag
+        try:
+            total_puzzles += int(top_entry.get("count", 0) or 0)
+        except (TypeError, ValueError):
+            pass
+        claimed_codes = top_entry.get("claimed_ec_params", [])
+        if isinstance(claimed_codes, list):
+            # Добавляем пазлы, которые брались кодами (если они не вошли в count)
+            try:
+                total_puzzles = max(total_puzzles, len(claimed_codes))
+            except Exception:
+                pass
+
+    return total_puzzles, name, tag
+
+
 def _build_stats_page(page: int, page_size: int = 7) -> tuple[str, InlineKeyboardMarkup | None]:
     users = load_all_users()
 
@@ -118,10 +198,20 @@ def _build_stats_page(page: int, page_size: int = 7) -> tuple[str, InlineKeyboar
     log_data = _load_puzzle_claim_log()
     log_users = log_data.get("users", {}) if isinstance(log_data, dict) else {}
     users_meta = log_data.get("users_meta", {}) if isinstance(log_data, dict) else {}
+    start_data = _load_start_users_log()
+    started_users = start_data.get("users", {}) if isinstance(start_data, dict) else {}
+    top_level_logged_users = {
+        str(k) for k, v in log_data.items()
+        if isinstance(log_data, dict) and str(k).isdigit() and isinstance(v, dict)
+    }
 
     # Показываем всех: и тех, у кого есть аккаунты, и тех, кто только получал пазлы.
     user_ids = sorted(
-        {str(uid) for uid in users.keys()} | {str(uid) for uid in log_users.keys()} | {str(uid) for uid in users_meta.keys()},
+        {str(uid) for uid in users.keys()}
+        | {str(uid) for uid in log_users.keys()}
+        | {str(uid) for uid in users_meta.keys()}
+        | top_level_logged_users
+        | {str(uid) for uid in started_users.keys()},
         key=_sort_key,
     )
     total_users = len(user_ids)
@@ -145,35 +235,25 @@ def _build_stats_page(page: int, page_size: int = 7) -> tuple[str, InlineKeyboar
     else:
         for user_id in user_ids[start:end]:
             accs = users.get(user_id, []) or []
-            user_log = log_users.get(str(user_id), {})
-            total_puzzles = 0
-            if isinstance(user_log, dict):
-                # Формат auto_claim: users.{tg_user_id}.{iggid}.count
-                nested_counts = [
-                    entry.get("count", 0)
-                    for entry in user_log.values()
-                    if isinstance(entry, dict)
-                ]
-                # Формат ручной выдачи: {"count": ..., "claimed_puzzles": ...}
-                direct_count = user_log.get("count", 0)
-                if nested_counts:
-                    parsed = []
-                    for x in nested_counts:
-                        try:
-                            parsed.append(int(x))
-                        except (TypeError, ValueError):
-                            continue
-                    total_puzzles = sum(parsed)
-                try:
-                    total_puzzles = max(total_puzzles, int(direct_count))
-                except (TypeError, ValueError):
-                    pass
+            user_log = log_users.get(str(user_id), {}) if isinstance(log_users, dict) else {}
+            total_puzzles, direct_name, direct_tag = _extract_user_stats(log_data, user_id)
 
             meta = users_meta.get(str(user_id), {})
-            log_name = user_log.get("tg_name", "") if isinstance(user_log, dict) else ""
-            log_tag = user_log.get("tg_tag", "") if isinstance(user_log, dict) else ""
-            display_name = meta.get("name") or meta.get("username") or log_name
-            display_tag = meta.get("tag") or meta.get("username") or log_tag
+            started = started_users.get(str(user_id), {}) if isinstance(started_users, dict) else {}
+            auto_name = user_log.get("tg_name", "") if isinstance(user_log, dict) else ""
+            auto_tag = user_log.get("tg_tag", "") if isinstance(user_log, dict) else ""
+            display_name = (
+                meta.get("name") or meta.get("username")
+                or started.get("name")
+                or auto_name
+                or direct_name
+            )
+            display_tag = (
+                meta.get("tag") or meta.get("username")
+                or started.get("tag")
+                or auto_tag
+                or direct_tag
+            )
             display_bits = " ".join(bit for bit in [display_name, f"@{display_tag}" if display_tag else ""] if bit)
             label = f"{user_id}"
             if display_bits:
@@ -227,6 +307,10 @@ class AddAccountState(StatesGroup):
     waiting_igg_id = State()
     waiting_igg_code = State()
 
+
+class BroadcastState(StatesGroup):
+    waiting_text = State()
+
 def is_cookie_refresh_running() -> bool:
     return any(task for task in COOKIE_REFRESH_TASKS if not task.done())
 
@@ -241,6 +325,35 @@ def _is_tester(user_id: int) -> bool:
 
 def _is_staff(user_id: int) -> bool:
     return _is_admin(user_id) or _is_tester(user_id)
+
+
+def _collect_broadcast_user_ids() -> list[int]:
+    """Собирает всех известных пользователей для массовой рассылки."""
+    ids: set[str] = set()
+
+    users = load_all_users()
+    if isinstance(users, dict):
+        ids |= {str(uid) for uid in users.keys()}
+
+    start_data = _load_start_users_log()
+    started_users = start_data.get("users", {}) if isinstance(start_data, dict) else {}
+    if isinstance(started_users, dict):
+        ids |= {str(uid) for uid in started_users.keys()}
+
+    log_data = _load_puzzle_claim_log()
+    if isinstance(log_data, dict):
+        log_users = log_data.get("users", {})
+        if isinstance(log_users, dict):
+            ids |= {str(uid) for uid in log_users.keys()}
+        ids |= {str(k) for k, v in log_data.items() if str(k).isdigit() and isinstance(v, dict)}
+
+    result = []
+    for uid in ids:
+        try:
+            result.append(int(uid))
+        except (TypeError, ValueError):
+            continue
+    return sorted(set(result))
 
 
 def _main_menu_for_user(user_id: int) -> ReplyKeyboardMarkup:
@@ -341,6 +454,60 @@ async def open_system_menu(message: types.Message):
     await message.answer("🔧 Системное меню:", reply_markup=admin_system_menu)
 
 
+@router.message(F.text == "📣 Сообщение всем")
+async def ask_broadcast_text(message: types.Message, state: FSMContext):
+    if not _is_admin(message.from_user.id):
+        await message.answer("🚫 Эта команда доступна только администраторам.")
+        return
+    await state.set_state(BroadcastState.waiting_text)
+    await message.answer(
+        "📣 Отправь текст, который нужно разослать всем пользователям.\n"
+        "Для отмены напиши: <code>отмена</code>.",
+        parse_mode="HTML",
+    )
+
+
+@router.message(BroadcastState.waiting_text)
+async def do_broadcast(message: types.Message, state: FSMContext):
+    if not _is_admin(message.from_user.id):
+        await state.clear()
+        await message.answer("🚫 Эта команда доступна только администраторам.")
+        return
+
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("⚠️ Пустое сообщение. Отправь текст или напиши «отмена».")
+        return
+    if text.lower() == "отмена":
+        await state.clear()
+        await message.answer("❎ Рассылка отменена.")
+        return
+
+    user_ids = _collect_broadcast_user_ids()
+    if not user_ids:
+        await state.clear()
+        await message.answer("⚠️ Нет пользователей для рассылки.")
+        return
+
+    sent = 0
+    failed = 0
+    for uid in user_ids:
+        try:
+            await message.bot.send_message(uid, text)
+            sent += 1
+            await asyncio.sleep(0.03)
+        except Exception:
+            failed += 1
+
+    await state.clear()
+    await message.answer(
+        f"✅ Рассылка завершена.\n"
+        f"📨 Отправлено: <b>{sent}</b>\n"
+        f"❌ Ошибок: <b>{failed}</b>",
+        parse_mode="HTML",
+    )
+
+
 @router.message(F.text.in_({"🧩 Взять пазл"}))
 async def open_collect_puzzle_menu(message: types.Message):
     await message.answer(
@@ -392,6 +559,7 @@ async def handle_collect_specific_puzzle(callback: CallbackQuery):
 @router.message(Command("start"))
 async def start_cmd(message: types.Message):
     """Приветственное сообщение и выбор панели"""
+    _register_started_user(message.from_user)
     user_id = message.from_user.id
     kb = _main_menu_for_user(user_id)
 
