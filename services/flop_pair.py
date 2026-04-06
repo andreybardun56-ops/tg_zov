@@ -325,12 +325,26 @@ async def run_flop_pair(user_id: str, uid: str = None, context=None):
     pairs_to_open = [p for p in pairs if _normalize_pair(p["c1"], p["c2"]) not in opened_pairs]
     already_open = len(pairs) - len(pairs_to_open)
     if not pairs_to_open:
-        return {"success": True, "message": "✅ Все пары уже открыты."}
+        async def no_open_handler(page):
+            share_chance, share_points = await _read_pool_chances(page)
+            lines = ["✅ Все пары уже открыты.", f"🎁 Шансы распределения: {share_chance}"]
+            if share_points:
+                lines.append(f"💎 Текущий пул призов: {share_points}/50000000")
+            if share_chance > 0:
+                lines.append("🚀 Есть шансы в пуле — пошел собирать...")
+                collected, remaining, collect_details = await _collect_pool_rewards(page, share_chance)
+                lines.append(f"🎁 Собрано наград из пула: {collected}")
+                lines.append(f"🎯 Осталось шансов в пуле: {remaining}")
+                lines.extend(collect_details)
+            return {"success": True, "message": "\n".join(lines)}
+
+        return await run_event_with_browser(user_id, uid, BASE_URL, "Найди пару", no_open_handler, context=context)
 
     async def handler(page):
         html = (await page.content()).lower()
         if _is_event_inactive_text(html):
             return {"success": True, "message": "⚠️ Событие ещё не началось или уже завершилось."}
+        share_chance, share_points = await _read_pool_chances(page)
 
         # Если период события сменился — не используем старые пары
         current_period = ""
