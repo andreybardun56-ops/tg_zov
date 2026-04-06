@@ -136,6 +136,38 @@ def save_accounts(user_id: str, accounts: List[Dict]):
     _save_data(data)
 
 
+def ensure_user_exists(user_id: str) -> bool:
+    """
+    Гарантирует, что пользователь присутствует в базе user_accounts.json.
+    Создаёт запись с пустым списком аккаунтов при первом появлении.
+    Возвращает True, если пользователь был добавлен, иначе False.
+    """
+    data = _load_data()
+    uid = str(user_id)
+    if uid in data:
+        return False
+    data[uid] = []
+    _save_data(data)
+    return True
+
+
+def ensure_users_exist(user_ids: List[str]) -> int:
+    """
+    Массово гарантирует наличие пользователей в user_accounts.json.
+    Возвращает количество добавленных записей.
+    """
+    data = _load_data()
+    added = 0
+    for user_id in user_ids:
+        uid = str(user_id)
+        if uid not in data:
+            data[uid] = []
+            added += 1
+    if added:
+        _save_data(data)
+    return added
+
+
 def add_account(
     user_id: str,
     uid: str,
