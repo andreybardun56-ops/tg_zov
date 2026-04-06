@@ -46,9 +46,9 @@ def _is_event_inactive_text(text: str) -> bool:
 
 def _response_indicates_failure(body: str) -> bool:
     """
-    Определяет, вернул ли сервер явную ошибку открытия карты.
-    Важно: для IGG-событий code/ret=0 часто означает успешный ответ,
-    поэтому это НЕ считаем ошибкой автоматически.
+    Пытается определить, что сервер явно вернул ошибку открытия карты.
+    Важно: для этого события `code/ret = 0` может быть успешным ответом,
+    поэтому не считаем это ошибкой автоматически.
     """
     if not body:
         return False
@@ -59,13 +59,16 @@ def _response_indicates_failure(body: str) -> bool:
         data = None
 
     if isinstance(data, dict):
+        # Частые поля явной ошибки в JSON-ответах
         for key in ("error", "errno", "err_code"):
             value = data.get(key)
-            if isinstance(value, bool) and value:
-                return True
-            if isinstance(value, (int, float)) and value > 0:
-                return True
-            if isinstance(value, str) and value.strip() not in ("", "0", "ok", "success"):
+            if isinstance(value, bool):
+                if value:
+                    return True
+            elif isinstance(value, (int, float)):
+                if value > 0:
+                    return True
+            elif isinstance(value, str) and value.strip() not in ("", "0", "ok", "success"):
                 return True
 
         success = data.get("success")
@@ -73,106 +76,14 @@ def _response_indicates_failure(body: str) -> bool:
             return True
 
         msg = str(data.get("msg", "")).lower()
-        if msg and any(x in msg for x in ("error", "ошиб", "invalid", "forbid", "denied", "fail")):
+        if msg and any(marker in msg for marker in ("error", "ошиб", "invalid", "forbid", "denied", "fail")):
             return True
+
         return False
 
     lowered = body.lower()
-    return any(x in lowered for x in ("ошибка", "error", "failed", "forbidden", "denied", "invalid"))
-
-
-async def _read_pool_chances(page) -> tuple[int, str]:
-    """
-    Читает данные блока пула призов:
-    - #share-chance (сколько попыток распределения)
-    - #share-points (текущее число очков в пуле)
-    """
-    chance = 0
-    share_points = ""
-
-    try:
-        chance_locator = page.locator("#share-chance").first
-        if await chance_locator.count() > 0:
-            raw = (await chance_locator.inner_text()).strip()
-            chance = int("".join(ch for ch in raw if ch.isdigit()) or "0")
-    except Exception:
-        chance = 0
-
-    try:
-        points_locator = page.locator("#share-points").first
-        if await points_locator.count() > 0:
-            share_points = (await points_locator.inner_text()).strip()
-    except Exception:
-        share_points = ""
-
-    return chance, share_points
-
-
-async def _collect_pool_rewards(page, initial_chance: int) -> tuple[int, int, list[str]]:
-    """
-    Автосбор наград из пула (кнопка "Распределение").
-    Возвращает: (собрано, осталось_шансов, детали_по_попыткам).
-    """
-    collected = 0
-    details: list[str] = []
-    max_attempts = max(0, int(initial_chance or 0))
-
-    for attempt_idx in range(1, max_attempts + 1):
-        try:
-            btn = page.locator(".fen-controls .get-btn").first
-            if await btn.count() == 0:
-                details.append(f"#{attempt_idx}: кнопка «Распределение» не найдена.")
-                break
-
-            before_chance, _ = await _read_pool_chances(page)
-            await btn.click(timeout=4000)
-            await asyncio.sleep(1.2)
-
-            reward_text = ""
-            for selector in (
-                ".reward-pop .txt",
-                ".reward-pop",
-                ".layui-layer-content",
-                ".swal2-html-container",
-                ".pop-con",
-                ".popup",
-            ):
-                loc = page.locator(selector).first
-                if await loc.count() > 0:
-                    txt = (await loc.inner_text()).strip()
-                    if txt:
-                        reward_text = txt.replace("\n", " ")[:220]
-                        break
-
-            for close_selector in (
-                ".reward-pop .close",
-                ".reward-pop .btn-close",
-                ".layui-layer-close",
-                ".swal2-confirm",
-                ".popup .close",
-            ):
-                close_loc = page.locator(close_selector).first
-                if await close_loc.count() > 0:
-                    try:
-                        await close_loc.click(timeout=1200)
-                        break
-                    except Exception:
-                        pass
-
-            await asyncio.sleep(0.8)
-            after_chance, _ = await _read_pool_chances(page)
-            if after_chance < before_chance:
-                collected += 1
-                details.append(f"#{attempt_idx}: ✅ Получено из пула" + (f" — {reward_text}" if reward_text else ""))
-            else:
-                details.append(f"#{attempt_idx}: ⚠️ Шанс не списался" + (f" — {reward_text}" if reward_text else ""))
-                break
-        except Exception as e:
-            details.append(f"#{attempt_idx}: ❌ Ошибка сбора из пула: {e}")
-            break
-
-    remaining, _ = await _read_pool_chances(page)
-    return collected, remaining, details
+    fail_markers = ("ошибка", "error", "failed", "forbidden", "denied", "invalid")
+    return any(marker in lowered for marker in fail_markers)
 
 
 def _build_pairs_preview(cards_data: list[dict], pairs: list[dict], hash_map: dict[str, list[dict]]) -> str:
@@ -515,15 +426,6 @@ async def run_flop_pair(user_id: str, uid: str = None, context=None):
             f"📊 Открыто пар: {opened}/{len(pairs_to_open)}",
             f"🔢 Осталось попыток: {attempts}",
         ]
-        summary.append(f"🎁 Шансы распределения: {share_chance}")
-        if share_points:
-            summary.append(f"💎 Текущий пул призов: {share_points}/50000000")
-        if share_chance > 0:
-            summary.append("🚀 Есть шансы в пуле — пошел собирать...")
-            collected, remaining, collect_details = await _collect_pool_rewards(page, share_chance)
-            summary.append(f"🎁 Собрано наград из пула: {collected}")
-            summary.append(f"🎯 Осталось шансов в пуле: {remaining}")
-            summary.extend(collect_details)
         if already_open:
             summary.append(f"🔁 Пропущено пар: {already_open} (уже были открыты)")
         summary.append("")
