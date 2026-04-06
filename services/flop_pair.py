@@ -44,6 +44,99 @@ def _is_event_inactive_text(text: str) -> bool:
     return any(marker in lowered for marker in EVENT_INACTIVE_MARKERS)
 
 
+async def _read_pool_chances(page) -> tuple[int, str]:
+    """
+    Читает шансы распределения и текущее значение пула из блока `.fen-controls`.
+    Возвращает: (share_chance, share_points_text).
+    """
+    share_chance = 0
+    share_points = ""
+    try:
+        chance_text = await page.locator("#share-chance").first.inner_text(timeout=3000)
+        share_chance = int((chance_text or "").strip() or "0")
+    except Exception:
+        share_chance = 0
+
+    try:
+        share_points = ((await page.locator("#share-points").first.inner_text(timeout=3000)) or "").strip()
+    except Exception:
+        share_points = ""
+
+    return share_chance, share_points
+
+
+async def _collect_pool_rewards(page, max_collect: int) -> tuple[int, int, list[str]]:
+    """
+    Нажимает кнопку распределения и пытается собрать награды `max_collect` раз.
+    Возвращает (collected_count, remaining_chances, details_lines).
+    """
+    collected = 0
+    details: list[str] = []
+    remaining = max(0, int(max_collect or 0))
+
+    for idx in range(1, remaining + 1):
+        try:
+            before, _ = await _read_pool_chances(page)
+            if before <= 0:
+                remaining = 0
+                break
+
+            clicked = False
+            for selector in (".get-btn", ".fen-controls .get-btn", "text=Распределение", "text=Distribution"):
+                try:
+                    btn = page.locator(selector).first
+                    if await btn.count() > 0:
+                        await btn.click(timeout=5000)
+                        clicked = True
+                        break
+                except Exception:
+                    continue
+
+            if not clicked:
+                details.append(f"#{idx} ⚠️ Кнопка «Распределение» не найдена.")
+                break
+
+            await asyncio.sleep(1.5)
+
+            reward_text = ""
+            for selector in (".reward-pop", ".pop", ".popup", ".dialog", ".award", ".result"):
+                try:
+                    loc = page.locator(selector).first
+                    if await loc.count() > 0:
+                        reward_text = (await loc.inner_text(timeout=1000)).strip()
+                        if reward_text:
+                            break
+                except Exception:
+                    continue
+            reward_text = reward_text[:140] if reward_text else "награда получена"
+
+            # Закрываем возможный попап
+            for selector in (".pop .close", ".popup .close", ".dialog .close", "text=Закрыть", "text=Close"):
+                try:
+                    close_btn = page.locator(selector).first
+                    if await close_btn.count() > 0:
+                        await close_btn.click(timeout=1200)
+                        break
+                except Exception:
+                    continue
+
+            await asyncio.sleep(0.8)
+            after, _ = await _read_pool_chances(page)
+            if after < before:
+                collected += 1
+                remaining = after
+                details.append(f"#{idx} ✅ {reward_text}")
+            else:
+                remaining = after
+                details.append(f"#{idx} ⚠️ Сервер не подтвердил списание шанса.")
+                break
+        except Exception as exc:
+            details.append(f"#{idx} ⚠️ Ошибка сбора: {exc}")
+            break
+
+    return collected, remaining, details
+
+
 def _build_pairs_preview(cards_data: list[dict], pairs: list[dict], hash_map: dict[str, list[dict]]) -> str:
     """
     Формирует мини-превью поля 5/5/4 и легенду, чтобы было видно где лежат пары.
@@ -283,7 +376,20 @@ async def run_flop_pair(user_id: str, uid: str = None, context=None):
     pairs_to_open = [p for p in pairs if _normalize_pair(p["c1"], p["c2"]) not in opened_pairs]
     already_open = len(pairs) - len(pairs_to_open)
     if not pairs_to_open:
-        return {"success": True, "message": "✅ Все пары уже открыты."}
+        async def no_open_handler(page):
+            share_chance, share_points = await _read_pool_chances(page)
+            lines = ["✅ Все пары уже открыты.", f"🎁 Шансы распределения: {share_chance}"]
+            if share_points:
+                lines.append(f"💎 Текущий пул призов: {share_points}/50000000")
+            if share_chance > 0:
+                lines.append("🚀 Есть шансы в пуле — пошел собирать...")
+                collected, remaining, collect_details = await _collect_pool_rewards(page, share_chance)
+                lines.append(f"🎁 Собрано наград из пула: {collected}")
+                lines.append(f"🎯 Осталось шансов в пуле: {remaining}")
+                lines.extend(collect_details)
+            return {"success": True, "message": "\n".join(lines)}
+
+        return await run_event_with_browser(user_id, uid, BASE_URL, "Найди пару", no_open_handler, context=context)
 
     async def handler(page):
         html = (await page.content()).lower()
@@ -372,6 +478,16 @@ async def run_flop_pair(user_id: str, uid: str = None, context=None):
         ]
         if already_open:
             summary.append(f"🔁 Пропущено пар: {already_open} (уже были открыты)")
+        share_chance, share_points = await _read_pool_chances(page)
+        summary.append(f"🎁 Шансы распределения: {share_chance}")
+        if share_points:
+            summary.append(f"💎 Текущий пул призов: {share_points}/50000000")
+        if share_chance > 0:
+            summary.append("🚀 Есть шансы в пуле — пошел собирать...")
+            collected, remaining, collect_details = await _collect_pool_rewards(page, share_chance)
+            summary.append(f"🎁 Собрано наград из пула: {collected}")
+            summary.append(f"🎯 Осталось шансов в пуле: {remaining}")
+            summary.extend(collect_details)
         summary.append("")
         summary.extend(rewards)
         summary.append("✅ Ежедневное открытие завершено!")
