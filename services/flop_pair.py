@@ -45,6 +45,58 @@ def _is_event_inactive_text(text: str) -> bool:
     return any(marker in lowered for marker in EVENT_INACTIVE_MARKERS)
 
 
+async def _page_indicates_event_inactive(page) -> bool:
+    """
+    Проверяет именно видимый текст страницы, чтобы не ловить ложные совпадения
+    по скрытым шаблонам/локализациям внутри HTML/JS.
+    """
+    try:
+        cards_count = await page.locator("li.flip").count()
+        if cards_count > 0:
+            return False
+    except Exception:
+        pass
+
+    visible_text = ""
+    try:
+        visible_text = await page.evaluate("() => (document.body && document.body.innerText) || ''")
+    except Exception:
+        visible_text = ""
+
+    return _is_event_inactive_text(visible_text)
+
+
+def _body_indicates_event_inactive(body: str) -> bool:
+    """
+    Для ajax-ответов проверяем только информативные поля JSON, чтобы не реагировать
+    на случайные вхождения маркеров в html/js.
+    """
+    if not body:
+        return False
+
+    msg_candidates: list[str] = []
+    try:
+        payload = json.loads(body)
+    except Exception:
+        payload = None
+
+    if isinstance(payload, dict):
+        for key in ("msg", "message", "error"):
+            value = payload.get(key)
+            if isinstance(value, str):
+                msg_candidates.append(value)
+        data = payload.get("data")
+        if isinstance(data, dict):
+            for key in ("msg", "message"):
+                value = data.get(key)
+                if isinstance(value, str):
+                    msg_candidates.append(value)
+    else:
+        msg_candidates.append(body)
+
+    return any(_is_event_inactive_text(text) for text in msg_candidates)
+
+
 def _response_indicates_failure(body: str) -> bool:
     """
     Пытается определить, что сервер явно вернул ошибку открытия карты.
@@ -493,8 +545,7 @@ async def run_flop_pair(user_id: str, uid: str = None, context=None):
         return await run_event_with_browser(user_id, uid, BASE_URL, "Найди пару", no_open_handler, context=context)
 
     async def handler(page):
-        html = (await page.content()).lower()
-        if _is_event_inactive_text(html):
+        if await _page_indicates_event_inactive(page):
             return {"success": True, "message": "⚠️ Событие ещё не началось или уже завершилось."}
         share_chance, share_points = await _read_pool_chances(page)
 
@@ -554,7 +605,7 @@ async def run_flop_pair(user_id: str, uid: str = None, context=None):
                     except Exception:
                         body = ""
 
-                if _is_event_inactive_text(body):
+                if _body_indicates_event_inactive(body):
                     return {
                         "success": False,
                         "message": "⚠️ Сервер вернул: событие ещё не началось или уже завершилось. Пары не были открыты.",
