@@ -35,7 +35,7 @@ from services.puzzle_claim_auto import claim_puzzle
 from services.puzzle_claim import issue_puzzle_codes, issue_specific_puzzle
 from services.dragon_quest import run_dragon_quest
 from services.puzzle_claim_auto2 import auto_claim_puzzle2, claim_puzzles_batch
-from services.accounts_manager import load_all_users
+from services.accounts_manager import load_all_users, ensure_user_exists, ensure_users_exist
 from services.farm_puzzles_auto import (
     is_farm_running,
     start_farm,
@@ -98,6 +98,7 @@ CLAIM_PUZZLES_CB = "claim_puzzles"
 
 PUZZLE_CLAIM_LOG = Path("data/puzzle_claim_log.json")
 START_USERS_LOG = Path("data/start_users.json")
+BROADCAST_REPORT_LOG = Path("data/broadcast_report.json")
 
 
 def _load_puzzle_claim_log() -> dict:
@@ -125,6 +126,23 @@ def _load_start_users_log() -> dict:
 def _save_start_users_log(data: dict) -> None:
     START_USERS_LOG.parent.mkdir(parents=True, exist_ok=True)
     with open(START_USERS_LOG, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _load_broadcast_report() -> dict:
+    if not BROADCAST_REPORT_LOG.exists():
+        return {}
+    try:
+        with open(BROADCAST_REPORT_LOG, "r", encoding="utf-8") as f:
+            return json.load(f) or {}
+    except Exception as exc:
+        logger.warning("[BROADCAST] ⚠️ Не удалось прочитать broadcast_report.json: %s", exc)
+        return {}
+
+
+def _save_broadcast_report(data: dict) -> None:
+    BROADCAST_REPORT_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with open(BROADCAST_REPORT_LOG, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
@@ -189,11 +207,28 @@ def _extract_user_stats(log_data: dict, user_id: str) -> tuple[int, str, str]:
     return total_puzzles, name, tag
 
 
-def _build_stats_page(page: int, page_size: int = 7) -> tuple[str, InlineKeyboardMarkup | None]:
-    users = load_all_users()
-
+def _collect_known_user_ids(
+    users: dict,
+    log_users: dict,
+    users_meta: dict,
+    top_level_logged_users: set[str],
+    started_users: dict,
+) -> list[str]:
     def _sort_key(val: str):
         return int(val) if str(val).isdigit() else str(val)
+
+    return sorted(
+        {str(uid) for uid in users.keys()}
+        | {str(uid) for uid in log_users.keys()}
+        | {str(uid) for uid in users_meta.keys()}
+        | top_level_logged_users
+        | {str(uid) for uid in started_users.keys()},
+        key=_sort_key,
+    )
+
+
+def _build_stats_page(page: int, page_size: int = 7) -> tuple[str, InlineKeyboardMarkup | None]:
+    users = load_all_users()
 
     log_data = _load_puzzle_claim_log()
     log_users = log_data.get("users", {}) if isinstance(log_data, dict) else {}
@@ -206,14 +241,14 @@ def _build_stats_page(page: int, page_size: int = 7) -> tuple[str, InlineKeyboar
     }
 
     # Показываем всех: и тех, у кого есть аккаунты, и тех, кто только получал пазлы.
-    user_ids = sorted(
-        {str(uid) for uid in users.keys()}
-        | {str(uid) for uid in log_users.keys()}
-        | {str(uid) for uid in users_meta.keys()}
-        | top_level_logged_users
-        | {str(uid) for uid in started_users.keys()},
-        key=_sort_key,
+    user_ids = _collect_known_user_ids(
+        users=users,
+        log_users=log_users,
+        users_meta=users_meta,
+        top_level_logged_users=top_level_logged_users,
+        started_users=started_users,
     )
+
     total_users = len(user_ids)
     total_accounts = sum(len(accs) for accs in users.values() if isinstance(accs, list))
 
@@ -242,17 +277,24 @@ def _build_stats_page(page: int, page_size: int = 7) -> tuple[str, InlineKeyboar
             started = started_users.get(str(user_id), {}) if isinstance(started_users, dict) else {}
             auto_name = user_log.get("tg_name", "") if isinstance(user_log, dict) else ""
             auto_tag = user_log.get("tg_tag", "") if isinstance(user_log, dict) else ""
+            first_account_name = ""
+            if accs and isinstance(accs[0], dict):
+                first_account_name = str(accs[0].get("username", "") or "")
+
             display_name = (
-                meta.get("name") or meta.get("username")
+                meta.get("name")
                 or started.get("name")
                 or auto_name
                 or direct_name
+                or first_account_name
             )
             display_tag = (
-                meta.get("tag") or meta.get("username")
+                meta.get("tag")
                 or started.get("tag")
                 or auto_tag
                 or direct_tag
+                or meta.get("username")
+                or started.get("username")
             )
             display_bits = " ".join(bit for bit in [display_name, f"@{display_tag}" if display_tag else ""] if bit)
             label = f"{user_id}"
@@ -285,6 +327,17 @@ def _build_stats_page(page: int, page_size: int = 7) -> tuple[str, InlineKeyboar
             ])
         except Exception:
             lines.append("\n⚠️ Не удалось прочитать puzzle_summary.json")
+
+    broadcast_report = _load_broadcast_report()
+    if broadcast_report:
+        lines.extend([
+            "",
+            "📣 <b>Последняя рассылка</b>",
+            f"🕒 {broadcast_report.get('timestamp', '—')}",
+            f"👥 Известно пользователей: <b>{broadcast_report.get('known_total', 0)}</b>",
+            f"✅ Доставлено: <b>{broadcast_report.get('sent', 0)}</b>",
+            f"❌ Ошибок: <b>{broadcast_report.get('failed', 0)}</b>",
+        ])
 
     keyboard = []
     if total_pages > 1:
@@ -402,6 +455,40 @@ async def show_stats(message: types.Message):
     await message.answer(text, parse_mode="HTML", reply_markup=markup)
 
 
+@router.message(F.text == "🧾 Синхронизировать users")
+async def sync_users_to_accounts_db(message: types.Message):
+    if not _is_admin(message.from_user.id):
+        await message.answer("🚫 У тебя нет доступа.")
+        return
+
+    users = load_all_users()
+    log_data = _load_puzzle_claim_log()
+    log_users = log_data.get("users", {}) if isinstance(log_data, dict) else {}
+    users_meta = log_data.get("users_meta", {}) if isinstance(log_data, dict) else {}
+    start_data = _load_start_users_log()
+    started_users = start_data.get("users", {}) if isinstance(start_data, dict) else {}
+    top_level_logged_users = {
+        str(k) for k, v in log_data.items()
+        if isinstance(log_data, dict) and str(k).isdigit() and isinstance(v, dict)
+    }
+
+    user_ids = _collect_known_user_ids(
+        users=users,
+        log_users=log_users,
+        users_meta=users_meta,
+        top_level_logged_users=top_level_logged_users,
+        started_users=started_users,
+    )
+    added = ensure_users_exist(user_ids)
+
+    await message.answer(
+        "✅ Синхронизация users выполнена.\n"
+        f"👥 Найдено пользователей: <b>{len(user_ids)}</b>\n"
+        f"➕ Добавлено в user_accounts.json: <b>{added}</b>",
+        parse_mode="HTML",
+    )
+
+
 @router.callback_query(F.data.startswith("stats_page:"))
 async def paginate_stats(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
@@ -491,17 +578,33 @@ async def do_broadcast(message: types.Message, state: FSMContext):
 
     sent = 0
     failed = 0
+    sent_ids: list[int] = []
+    failed_ids: list[int] = []
     for uid in user_ids:
         try:
             await message.bot.send_message(uid, text)
             sent += 1
+            sent_ids.append(uid)
             await asyncio.sleep(0.03)
         except Exception:
             failed += 1
+            failed_ids.append(uid)
+
+    _save_broadcast_report(
+        {
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "known_total": len(user_ids),
+            "sent": sent,
+            "failed": failed,
+            "sent_ids": sent_ids,
+            "failed_ids": failed_ids,
+        }
+    )
 
     await state.clear()
     await message.answer(
         f"✅ Рассылка завершена.\n"
+        f"👥 Всего известных: <b>{len(user_ids)}</b>\n"
         f"📨 Отправлено: <b>{sent}</b>\n"
         f"❌ Ошибок: <b>{failed}</b>",
         parse_mode="HTML",
@@ -560,6 +663,7 @@ async def handle_collect_specific_puzzle(callback: CallbackQuery):
 async def start_cmd(message: types.Message):
     """Приветственное сообщение и выбор панели"""
     _register_started_user(message.from_user)
+    ensure_user_exists(message.from_user.id)
     user_id = message.from_user.id
     kb = _main_menu_for_user(user_id)
 
